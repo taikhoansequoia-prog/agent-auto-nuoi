@@ -28,6 +28,8 @@ class WarmupWorkflow:
             "google_query": "tin tức mới nhất",
             "youtube_query": "video giải trí"
         }
+        # v1.4.5: nhớ selector popup đã báo lần cuối -> chống log lặp (xem _close_popups)
+        self._popup_sel_memo = None
 
     @property
     def stop_requested(self):
@@ -95,6 +97,10 @@ class WarmupWorkflow:
 
     def action_search_google(self, page):
         """Hành động 1: Lên Google tìm kiếm theo chủ đề AI chọn"""
+        # v1.4.5: action này KHÔNG nằm trong action_map của phase nào (xem run_random_session)
+        # -> hiện là code chết. Nếu định bật lại: bấm kết quả Google phải dùng
+        # Locator.click() + poll page.url (SERP đổi href thành /goto?url=, và
+        # human_click ở đây KHÔNG kích hoạt điều hướng — xem _navigate_via_google).
         print("  -> [Action] Tìm kiếm Google...")
         
         # [CẬP NHẬT LẤY TỪ KHÓA TỪ AI THEME]
@@ -318,7 +324,10 @@ class WarmupWorkflow:
             # 1-3 lượt (random tỷ lệ) rồi mới pick 1 video thật sự để xem.
             # ---------------------------------------------------------
             num_sweeps = random.randint(1, 3)
-            print(f"      + Sẽ lướt xem trước {num_sweeps} lượt rồi mới chốt video...")
+            if num_sweeps > 1:
+                print(f"      + Sẽ lướt xem trước {num_sweeps} lượt rồi mới chốt video...")
+            else:
+                print("      + Sẽ lướt xem trước 1 lượt rồi chốt video...")
             for sweep_idx in range(num_sweeps):
                 if not videos:
                     break
@@ -1560,7 +1569,8 @@ class WarmupWorkflow:
 
     def _preview_sweep_browse(self, page, elements):
         """Xem lướt bằng chuột: quẹt qua vài thumb, dừng trỏ chuột 'ngắm' ngẫu nhiên.
-        Dùng chung cho trang chủ YouTube (list locator) và TikTok (đang xem).
+        v1.4.5: CHỈ dùng cho trang chủ YouTube (list locator thumbnail). TikTok dùng feed
+        scroll-snap toàn màn hình nên tự có nhánh xử lý riêng trong action_watch_tiktok.
         Số thumb được trỏ xem + thời lượng dừng ở từng thumb = ngẫu nhiên
         (random tỷ lệ), không click."""
         try:
@@ -1574,8 +1584,10 @@ class WarmupWorkflow:
                     # Random tỷ lệ hành vi từng thumb: lướt vội / liếc nhanh / ngắm kỹ
                     mode_roll = random.random()
                     if mode_roll < 0.25:
-                        # Lướt vội qua, không dừng (chỉ quét tầm mắt)
+                        # Lướt vội qua: vẫn PHẢI trỏ chuột vào thumb (v1.4.5 — trước đây
+                        # nhánh này bỏ qua human_hover nên ~25% thumb không hề được trỏ)
                         self._smooth_scroll_to_element(page, el)
+                        self.human_hover(page, el)
                         self.random_sleep(0.3, 0.8)
                     elif mode_roll < 0.55:
                         # Nhìn lướt: dừng ngắn
@@ -1736,8 +1748,10 @@ class WarmupWorkflow:
                 # 2. Cuộn sang video kế tiếp (feed dùng scroll-snap ~ 1 viewport)
                 #    v1.4.2: trước khi quẹt, đôi khi dừng trỏ chuột "ngắm" video như
                 #    xem lướt, thậm chí quẹt nhẹ "thăm dò" rồi kéo về (random tỷ lệ)
+                #    v1.4.5: nâng tỷ lệ 0.5 -> 0.75 và trỏ thêm thumb video KẾ TIẾP
+                #    (E2E 16/10 tiktok 4 lượt chuyển mà 0 lần dừng trỏ -> quá hiếm)
                 if v_index < num_videos - 1:
-                    if random.random() < 0.5:
+                    if random.random() < 0.75:
                         try:
                             print("      + Dừng chút, trỏ chuột ngắm video đang xem (kiểu xem lướt)...")
                             self.human_hover(page, page.locator("video:visible").first)
@@ -1747,6 +1761,16 @@ class WarmupWorkflow:
                                 self.random_sleep(1, 3)
                             else:
                                 self.random_sleep(3, 6)
+                            # Liếc sang video kế tiếp cạnh dưới (kiểu mắt đọc trước)
+                            if random.random() < 0.5:
+                                try:
+                                    next_vid = page.locator("video:visible").nth(1)
+                                    if next_vid.count() > 0:
+                                        print("      + Liếc mắt xuống thumb video kế tiếp...")
+                                        self.human_hover(page, next_vid)
+                                        self.random_sleep(0.6, 1.6)
+                                except Exception:
+                                    pass
                         except Exception:
                             self.move_mouse_viewport_center(page)
                     if random.random() < 0.4:
@@ -2556,17 +2580,41 @@ class WarmupWorkflow:
             "button:has-text('Bỏ qua')"  # Nút chứa chữ Bỏ qua
         ]
         
+        # v1.4.5: hàm này được gọi MỖI VÒNG của _simulate_scroll_and_read, mà popup thì
+        # hiện liên tục -> trước đây in 1 dòng [+] cho MỖI element khớp selector (thấy tận
+        # 19 dòng trùng nhau liên tiếp trong 1 lần đọc bài). Nay: chỉ in khi selector khớp
+        # ĐỔI so với lần báo trước, và in 1 dòng tổng kết số nút đã bấm trong lần gọi này.
+        clicked = 0
+        sels_hit = []
+        matched = []
         for selector in close_selectors:
             try:
                 # Tìm xem có nút nào đang hiển thị trên màn hình không
                 elements = page.locator(f"{selector}:visible").all()
-                for el in elements:
-                    print(f"      [+] Phát hiện popup quảng cáo chặn màn hình. Đang đóng...")
-                    # Click tắt với timeout cực ngắn để không làm chậm bot
+            except Exception:
+                continue # Bỏ qua nếu selector không đọc được
+            if not elements:
+                continue
+            matched.append(selector)
+            for el in elements:
+                # Click tắt với timeout cực ngắn để không làm chậm bot
+                try:
                     el.click(timeout=2000)
+                    clicked += 1
                     self.random_sleep(1, 2)
-            except:
-                pass # Bỏ qua nếu có lỗi không click được
+                except Exception:
+                    continue
+            sels_hit.append(selector)
+
+        # Chỉ báo khi "bộ selector khớp" ĐỔI so với lần báo trước: popup cũ còn hiện
+        # trong lúc cuộn bài chỉ tốn đúng 1 dòng cho cả phiên đọc (trước fix: 1 dòng
+        # cho MỖI element khớp -> thấy 19 dòng trùng nhau liên tiếp trong 1 lần đọc).
+        hit_set = tuple(matched)
+        if hit_set and hit_set != self._popup_sel_memo:
+            print(f"      [+] Phát hiện popup quảng cáo chặn màn hình. Đang đóng...")
+            self._popup_sel_memo = hit_set
+        if clicked:
+            print(f"      [+] Đã đóng {clicked} nút popup (selector: {', '.join(sels_hit)}).")
 
     def _generate_bezier_path(self, start_point, end_point, steps=30):
         """Hàm toán học sinh tọa độ các điểm trên đường cong Bezier"""
