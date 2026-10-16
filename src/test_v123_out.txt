@@ -1,0 +1,55 @@
+======================================================================
+TEST THẬT v1.2.3 — AI sinh biến thể cả Google + YouTube (CDP)
+Profile GPM: 589ce4a3-9143-4f40-89d7-b43f61365e2e
+======================================================================
+
+[0] UNIT gate: phase=mail -> _safe_ask_keyword YouTube không được gọi
+  [AI] Từ khóa Google được sinh: 'kinh nghiệm du lịch đà nẵng tự túc'
+    PASS: mail phase chỉ 1 prompt, youtube_query giữ nguyên từ khóa cặp
+
+[1] Đang yêu cầu GPM mở trình duyệt (headed)...
+
+[2] Kết nối Playwright qua CDP...
+[*] Đang kết nối Playwright với trình duyệt...
+[+] Kết nối Playwright thành công!
+
+[3] WarmupWorkflow(brain=DualBrain, phase=clean, skip_youtube=False) + 1 action...
+[*] Bắt đầu phiên làm việc ngẫu nhiên với 1 hành động.
+  [AI] Từ khóa Google được sinh: 'kinh nghiệm du lịch đà nẵng tự túc'
+  [AI] Từ khóa YouTube được sinh: 'japanese street food tour'
+      [Phase] Chế độ ngâm: CLEAN (9 hành động trong lịch trình).
+
+[*] Hành động thứ 1/1:
+  -> [Action] Đọc báo tin tức...
+      + Đang tập trung đọc nội dung bài viết trong ~44s...
+      + Đã đọc xong bài. Đang nghỉ ngơi trước khi chuyển hành động...
+      + Đang tìm và click bài báo thứ 1...
+      + Đã quét thấy bài báo hợp lệ. Đang lăn chuột tới mục tiêu...
+        -> [Radar] Cách mục tiêu 562px. Đang lăn chuột...
+      + Bài báo mở trong TAB HIỆN TẠI.
+      + Bắt đầu lướt đọc bài báo...
+      + Đang tập trung đọc nội dung bài viết trong ~93s...
+      + Đã đọc xong bài. Đang nghỉ ngơi trước khi chuyển hành động...
+      + Back lại trang chủ để tìm bài tiếp theo...
+      + Đang tìm và click bài báo thứ 2...
+      [-] Khung nhìn hiện tại không bắt được bài báo nào. Bot sẽ lướt thêm để tìm sau.
+[+] Kết thúc phiên làm việc ngẫu nhiên.
+
+[4] VERIFY wiring v1.2.3:
+    Số lần brain được hỏi: 2 (kỳ vọng 2)
+    Prompt #1 = Google + chứa 'du lich viet nam': True
+    Prompt #2 = YouTube + chứa 'travel vlog japan': True
+    Prompt #1 (200 ký tự đầu): Bạn là người dùng Việt Nam đang lướt web. Hãy tạo 1 từ khóa tìm kiếm Google ngắn gọn (3-8 từ), là biến thể hoặc cách diễn đạt khác xoay quanh chủ đề cho trước (không cần giống nguyên văn; có thể cụ th
+    Prompt #2 (200 ký tự đầu): Bạn là người dùng Việt Nam đang lướt web. Hãy tạo 1 từ khóa tìm kiếm YouTube ngắn gọn (3-8 từ), là biến thể hoặc cách diễn đạt khác xoay quanh chủ đề cho trước (không cần giống nguyên văn; có thể cụ t
+    google_query sau phiên: 'kinh nghiệm du lịch đà nẵng tự túc' (kỳ vọng 'kinh nghiệm du lịch đà nẵng tự túc') -> True
+    youtube_query sau phiên: 'japanese street food tour' (kỳ vọng 'japanese street food tour') -> True
+
+======================================================================
+[+] KET LUAN: v1.2.3 PASS (2 prompt đúng nền tảng + 2 hint đúng vế + cả 2 từ khóa bị thay + action không crash)
+======================================================================
+
+[5] Dọn dẹp: đóng Playwright + profile GPM...
+[+] Đã ngắt kết nối Playwright.
+[+] Đã đóng Profile 589ce4a3-9143-4f40-89d7-b43f61365e2e.
+[*] Đã đóng profile GPM.
+[*] XONG.

@@ -1,0 +1,38 @@
+======================================================================
+TEST THẬT v1.2.4 — action_search_youtube human_type (CDP)
+Profile GPM: 589ce4a3-9143-4f40-89d7-b43f61365e2e | keyword: 'japanese street food tour'
+======================================================================
+
+[1] GPM mở trình duyệt...
+
+[2] Kết nối Playwright qua CDP...
+[*] Đang kết nối Playwright với trình duyệt...
+[+] Kết nối Playwright thành công!
+
+[3] WarmupWorkflow(phase=youtube) + action_search_youtube (stub xem video)...
+  -> [Action] Tìm kiếm và xem trên YouTube...
+      + Đang nhập từ khóa: 'japanese street food tour'...
+      + Nhập từ khóa hoàn tất.
+      + Đã tìm kiếm: 'japanese street food tour'. Đang lướt đọc các kết quả...
+      + Quyết định chọn video thứ 3 trong danh sách.
+      + Đang dừng lại đọc kỹ tiêu đề trước khi click...
+      (stub) bỏ qua click video
+  -> [Action] Bắt đầu chuỗi xem YouTube tìm kiếm: 2 video.
+      (stub) bỏ qua xem video
+
+[4] VERIFY:
+    human_type bắt đầu gõ (log): True
+    human_type hoàn tất (log):   True
+    Đã search đúng keyword:      True
+    URL trang kết quả: https://www.youtube.com/results?search_query=japanese+street+food+tour
+    URL chứa /results?search_query=<keyword>: True
+
+======================================================================
+[+] KET LUAN: v1.2.4 PASS (gõ human_type từng ký tự vào YouTube search + ra kết quả đúng, không crash)
+======================================================================
+
+[5] Dọn dẹp...
+[+] Đã ngắt kết nối Playwright.
+[+] Đã đóng Profile 589ce4a3-9143-4f40-89d7-b43f61365e2e.
+[*] Đã đóng profile GPM.
+[*] XONG.

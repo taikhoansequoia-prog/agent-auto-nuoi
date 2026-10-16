@@ -8,6 +8,7 @@ import json
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../')))
 
 from src.browser.bitbrowser_api import BitBrowserAPI
+from src.logger import TeeStdout
 from src.browser.playwright_core import BrowserController
 from src.agent.brain_manager import BrainManager
 from src.database.db_handler import DatabaseHandler
@@ -80,10 +81,15 @@ def main():
 
     db = DatabaseHandler()
     api = BitBrowserAPI(port=54345) # Khởi tạo API kết nối với BitBrowser
-    
+
+    # Task 5: tee mọi print vào file log riêng của profile đang chạy (data/logs/{id}.log)
+    tee = TeeStdout(None)
+    sys.stdout = tee
+
     print("🚀 BẮT ĐẦU HỆ THỐNG AGENT (BITBROWSER + ORGANIC TRAFFIC) 🚀")
 
     for profile_id in PROFILES:
+        tee.profile_id = profile_id
         print(f"\n{'='*60}")
         print(f"[*] Bắt đầu xử lý Profile: {profile_id}")
         
@@ -131,9 +137,11 @@ def main():
             # 6. Đóng BitBrowser để giải phóng RAM
             api.close_profile(profile_id)
             print("[*] Nghỉ 5s trước khi chạy Profile tiếp theo...")
-            time.sleep(5) 
+            time.sleep(5)
 
+    tee.profile_id = None
     print("\n🎉 ĐÃ HOÀN THÀNH TOÀN BỘ DANH SÁCH PROFILE 🎉")
+    sys.stdout = tee.original
 
 if __name__ == "__main__":
     main()

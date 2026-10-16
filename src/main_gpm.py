@@ -12,6 +12,7 @@ from src.agent.brain_manager import BrainManager
 from src.database.db_handler import DatabaseHandler
 from src.workflow.warmup import WarmupWorkflow
 from src.browser.bitbrowser_api import BitBrowserAPI
+from src.logger import TeeStdout
 
 def get_daily_theme_from_file():
     """Đọc file keywords.txt nằm ngay cùng thư mục với file main.py hiện tại"""
@@ -76,10 +77,15 @@ def main():
 
     db = DatabaseHandler()
     api = AntidetectAPI()
-    
+
+    # Task 5: tee mọi print vào file log riêng của profile đang chạy (data/logs/{id}.log)
+    tee = TeeStdout(None)
+    sys.stdout = tee
+
     print("🚀 BẮT ĐẦU HỆ THỐNG AGENT (100% ORGANIC & AI THEME) 🚀")
 
     for profile_id in PROFILES:
+        tee.profile_id = profile_id
         print(f"\n{'='*60}")
         print(f"[*] Bắt đầu xử lý Profile: {profile_id}")
         
@@ -122,7 +128,9 @@ def main():
             api.close_profile(profile_id)
             time.sleep(5) 
 
+    tee.profile_id = None
     print("\n🎉 ĐÃ HOÀN THÀNH TOÀN BỘ DANH SÁCH PROFILE 🎉")
+    sys.stdout = tee.original
 
 if __name__ == "__main__":
     main()

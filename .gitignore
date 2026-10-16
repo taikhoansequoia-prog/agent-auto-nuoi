@@ -23,10 +23,19 @@ src/dist/
 .vscode/
 .idea/
 
-# Runtime data & artifacts
-data/*.db
-data/temp_screenshots/
+# Runtime data & artifacts (data/ = repo-root runtime state, xem src/paths.py)
+# Khong commit: DB that, log, config may, backup DB
+data/
+src/data/
 *.log
+
+# Third-party clone (co .git rieng) - khong commit vao repo nay
+src/andrej-karpathy-skills/
+
+# Script tam khi debug/do nguyen nhan
+_tmp_*.py
+_tmp_*.png
+_tmp_*.txt
 
 # Test / debug screenshots
 current_target.png

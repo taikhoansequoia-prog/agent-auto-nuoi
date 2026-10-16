@@ -1,0 +1,49 @@
+======================================================================
+TEST THẬT v1.2.6 — status/duration_s/error landing DB (CDP)
+Profile GPM: 589ce4a3-9143-4f40-89d7-b43f61365e2e
+======================================================================
+
+[1] GPM mở trình duyệt...
+
+[2] Kết nối Playwright qua CDP...
+[*] Đang kết nối Playwright với trình duyệt...
+[+] Kết nối Playwright thành công!
+
+[3] A) run_random_session với action thành công (stub nhanh)...
+[*] Bắt đầu phiên làm việc ngẫu nhiên với 1 hành động.
+      [Phase] Chế độ ngâm: YOUTUBE (5 hành động trong lịch trình).
+
+[*] Hành động thứ 1/1:
+      (stub) action ok
+[+] Kết thúc phiên làm việc ngẫu nhiên.
+    row: {'id': 7, 'profile_id': '589ce4a3-9143-4f40-89d7-b43f61365e2e', 'action': 'action_read_news', 'platform': 'vnexpress.net', 'url': 'https://vnexpress.net/', 'title': '', 'created_at': '2026-10-14T10:39:51', 'status': 'ok', 'duration_s': 0.5, 'error': None}
+    A status=ok + duration_s + error NULL + đúng pid: True
+
+[4] B) run_random_session với action raise exception...
+[*] Bắt đầu phiên làm việc ngẫu nhiên với 1 hành động.
+      [Phase] Chế độ ngâm: YOUTUBE (5 hành động trong lịch trình).
+
+[*] Hành động thứ 1/1:
+    exception lan len caller (hành vi cũ giữ nguyên): True
+    row: {'id': 8, 'profile_id': '589ce4a3-9143-4f40-89d7-b43f61365e2e', 'action': 'action_read_news', 'platform': '', 'url': 'about:blank', 'title': '', 'created_at': '2026-10-14T10:39:51', 'status': 'error', 'duration_s': 0.0, 'error': 'E2E forced failure v126'}
+
+[5] C) _watch_single_video_logic thành công (page stub, duration 12s)...
+      + Đang kiểm tra quảng cáo đầu video...
+      + Thời lượng thực: 12s. Sẽ xem: 59.4% (~7s).
+      + Đã hoàn thành chuỗi xem YouTube trong session này.
+    row: {'id': 9, 'profile_id': '589ce4a3-9143-4f40-89d7-b43f61365e2e', 'action': 'watch_video', 'platform': 'YouTube', 'url': 'https://www.youtube.com/watch?v=dQw4w9WgXcQ', 'title': 'Test Video Title', 'created_at': '2026-10-14T10:39:58', 'status': 'ok', 'duration_s': 7.0, 'error': None}
+
+[6] D) _watch_single_video_logic lỗi locator -> row error, không double...
+      + Đang kiểm tra quảng cáo đầu video...
+      + Lỗi trong quá trình xử lý chuỗi video: no player element
+    2 row watch_video gần nhất: [(10, 'error', 'no player element', 0.0, ''), (9, 'ok', None, 7.0, 'Test Video Title')]
+    D status=error + error text + duration + title trống: True
+
+======================================================================
+[+] KET LUAN: v1.2.6 PASS — 4/4 scenario (ok/error action, ok/error video) ghi đúng cột mới
+======================================================================
+
+[7] Dọn dẹp...
+[+] Đã ngắt kết nối Playwright.
+[+] Đã đóng Profile 589ce4a3-9143-4f40-89d7-b43f61365e2e.
+[*] Đã đóng profile GPM.

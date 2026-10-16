@@ -2,88 +2,87 @@ import os
 import json
 import base64
 from openai import OpenAI
+from .base_brain import BaseBrain
 
-class OpenAIBrain:
-    def __init__(self, api_key=None, model_name="gpt-4o"):
-        """
-        Khởi tạo OpenAI Brain với API Key và Model mặc định (gpt-4o tối ưu cho vision và text).
-        """
+
+class GenericLLMBrain(BaseBrain):
+    """Bộ não LLM tổng quát, tương thích mọi API theo chuẩn OpenAI (OpenAI, Qwen, Ollama...)."""
+
+    def __init__(self, api_key=None, model_name="gpt-4o", base_url=None):
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
-        self.client = OpenAI(api_key=self.api_key)
+        kwargs = {"api_key": self.api_key}
+        if base_url:
+            kwargs["base_url"] = base_url
+        self.client = OpenAI(**kwargs)
         self.model_name = model_name
 
-    def analyze_text(self, prompt):
-        """
-        Dùng cho các tác vụ thuần văn bản (Ví dụ: AI suy nghĩ chủ đề, sinh từ khóa...).
-        Trả về dictionary (JSON).
-        """
+    def ask_text(self, prompt: str) -> str:
+        """Gửi text prompt thuần túy, nhận về string. Dùng cho keyword generation."""
         try:
             response = self.client.chat.completions.create(
                 model=self.model_name,
-                response_format={"type": "json_object"}, # Ép OpenAI trả về cấu trúc JSON
                 messages=[
-                    {
-                        "role": "system", 
-                        "content": "You are a helpful assistant that always outputs valid JSON."
-                    },
-                    {
-                        "role": "user", 
-                        "content": prompt
-                    }
+                    {"role": "system", "content": "Bạn là trợ lý tạo từ khóa. Chỉ trả về duy nhất từ khóa, không giải thích, không dấu ngoặc."},
+                    {"role": "user", "content": prompt}
                 ],
-                temperature=0.7
+                temperature=0.7,
+                timeout=10
             )
-            
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            print(f"[-] Lỗi GenericLLMBrain (ask_text): {e}")
+            return ""
+
+    def analyze_text(self, prompt):
+        """Dùng cho các tác vụ thuần văn bản cần trả về JSON dict."""
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=[
+                    {"role": "system", "content": "You are a helpful assistant that always outputs valid JSON."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.7,
+                timeout=10
+            )
             content = response.choices[0].message.content
             return json.loads(content)
-            
         except Exception as e:
-            print(f"[-] Lỗi OpenAI Brain (analyze_text): {e}")
+            print(f"[-] Lỗi GenericLLMBrain (analyze_text): {e}")
             return {"action": "error", "message": str(e)}
 
     def analyze_screen(self, prompt, image_path=None):
-        """
-        Xử lý màn hình (Vision) hoặc fallback sang Text nếu không có ảnh truyền vào.
-        Khắc phục hoàn toàn lỗi expected str, bytes or os.PathLike object, not NoneType.
-        """
+        """Xử lý màn hình (Vision) hoặc fallback sang Text nếu không có ảnh."""
         try:
-            # TRƯỜNG HỢP 1: Không có ảnh -> Chuyển sang xử lý thuần text an toàn
             if not image_path:
                 return self.analyze_text(prompt)
 
-            # TRƯỜNG HỢP 2: Có ảnh -> Đọc file ảnh và gửi kèm OpenAI Vision
             if not os.path.exists(image_path):
-                raise FileNotFoundError(f"Không tìm thấy file ảnh tại đường dẫn: {image_path}")
+                raise FileNotFoundError(f"Không tìm thấy file ảnh: {image_path}")
 
             with open(image_path, "rb") as image_file:
                 base64_image = base64.b64encode(image_file.read()).decode('utf-8')
 
             response = self.client.chat.completions.create(
                 model=self.model_name,
-                response_format={"type": "json_object"},
                 messages=[
                     {
                         "role": "user",
                         "content": [
-                            {
-                                "type": "text", 
-                                "text": prompt
-                            },
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/png;base64,{base64_image}"
-                                }
-                            }
+                            {"type": "text", "text": prompt},
+                            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{base64_image}"}}
                         ]
                     }
                 ],
-                max_tokens=500
+                max_tokens=500,
+                timeout=10
             )
-
             content = response.choices[0].message.content
             return json.loads(content)
-
         except Exception as e:
-            print(f"[-] Lỗi OpenAI Brain (analyze_screen): {e}")
+            print(f"[-] Lỗi GenericLLMBrain (analyze_screen): {e}")
             return {"action": "error", "message": str(e)}
+
+
+# Alias giữ tương thích ngược cho code cũ import OpenAIBrain
+OpenAIBrain = GenericLLMBrain
