@@ -2249,14 +2249,26 @@ clearly tách nhóm hơn kiểu label trần + separator."""
 
     def start_automation(self):
         # Sprint 1.3: tài khoản lấy từ checklist đã tick (Firefox đã bị chặn tick từ UI)
-        profiles = [r["id"] for r in self.profile_rows if r["var"].get() and not r["firefox"]]
+        # v1.4.4: dòng đang bị ẨN bởi bộ lọc Nhóm/Từ khóa KHÔNG được đưa vào danh sách chạy
+        # (bộ lọc giờ GIỚI HẠN phạm vi chạy, không chỉ ẩn hiển thị).
+        profiles = [r["id"] for r in self.profile_rows
+                    if r["var"].get() and not r["firefox"] and not r.get("hidden", False)]
+        n_ticked = sum(1 for r in self.profile_rows if r["var"].get() and not r["firefox"])
+        n_hidden = n_ticked - len(profiles)
 
         if not profiles:
-            messagebox.showwarning(
-                "Cảnh báo",
-                "Chưa tick chọn tài khoản nào để ngâm!\n\n"
-                "Bấm 'Tải từ GPM' để kéo danh sách, hoặc 'Dán ID thủ công'.",
-            )
+            if n_ticked:
+                messagebox.showwarning(
+                    "Cảnh báo",
+                    f"Đã tick {n_ticked} tài khoản nhưng tất cả đang bị ẨN bởi bộ lọc Nhóm/Từ khóa.\n\n"
+                    "Chọn 'Tất cả nhóm' / xóa ô Lọc để hiện lại, hoặc tick lại trong danh sách đang hiện.",
+                )
+            else:
+                messagebox.showwarning(
+                    "Cảnh báo",
+                    "Chưa tick chọn tài khoản nào để ngâm!\n\n"
+                    "Bấm 'Tải từ GPM' để kéo danh sách, hoặc 'Dán ID thủ công'.",
+                )
             return
 
         # Sprint 0.3: chặn UUID sai format (ID tải từ API luôn hợp lệ; chặn cho ID dán tay)
@@ -2313,13 +2325,17 @@ clearly tách nhóm hơn kiểu label trần + separator."""
         for tab in self.notebook.tabs()[1:]:
             self.notebook.forget(tab)
             
-        for i in range(max_workers):
+        # v1.4.4: số tab/slot = số profile sẽ chạy (không tạo slot thừa khi profile < luồng)
+        n_slots = min(max_workers, len(profiles))
+        for i in range(n_slots):
             self._create_tab(f"Slot {i + 1}")
 
         self._running = True
-        self._active_slots = list(range(max_workers))
-            
-        print(f"Bắt đầu khởi chạy {len(profiles)} profiles trên {max_workers} luồng...")
+        self._active_slots = list(range(n_slots))
+
+        if n_hidden:
+            print(f"[!] {n_hidden} profile đã tick nhưng đang ẩn bởi bộ lọc Nhóm/Từ khóa - sẽ KHÔNG chạy.")
+        print(f"Bắt đầu khởi chạy {len(profiles)} profiles trên {n_slots} luồng...")
         
         screen_w = self.root.winfo_screenwidth()
         screen_h = self.root.winfo_screenheight() - 40
@@ -2334,8 +2350,10 @@ clearly tách nhóm hơn kiểu label trần + separator."""
         threading.Thread(target=self.run_thread_pool, args=(profiles, themes, max_workers, screen_w, screen_h, skip_youtube, skip_random_keywords, browser_type, api_port, brain_type, phase, fixed_target_s), daemon=True).start()
 
     def run_thread_pool(self, profiles, themes, max_workers, screen_w, screen_h, skip_youtube, skip_random_keywords, browser_type=BROWSER_GPM, api_port="", brain_type="none", phase="clean", fixed_target_s=0):
+        # v1.4.4: số slot = min(luồng, số profile) - khớp số tab đã tạo trong start_automation
+        n_slots = min(max_workers, len(profiles))
         slots_queue = queue.Queue()
-        for i in range(max_workers):
+        for i in range(n_slots):
             slots_queue.put(i)
         
         print(f"[System] Đang chạy với Browser: {browser_type.upper()} | Port API: {api_port or 'default'} | AI Brain: {brain_type} | Chế độ ngâm: {phase}")
