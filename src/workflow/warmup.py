@@ -276,6 +276,9 @@ class WarmupWorkflow:
         
         try:
             if "youtube.com" not in page.url or page.url == "https://www.youtube.com/":
+                # v1.4.6: YouTube là site đích — vào thẳng là CỐ Ý (không phải
+                # lỗi bỏ cổng Google; cổng Google chỉ bắt buộc cho TikTok/Wiki/báo).
+                print("      + [YouTube] Đích là youtube.com — vào thẳng (site đích, cố ý).")
                 # --- FIX LỖI INTERRUPTED NAVIGATION ---
                 try:
                     page.goto("https://www.youtube.com", wait_until="domcontentloaded", timeout=45000)
@@ -682,6 +685,9 @@ class WarmupWorkflow:
         print("  -> [Action] Truy cập Google Finance tra cứu thị trường...")
         try:
             # 1. Truy cập trang chủ Google Finance
+            # v1.4.6: đích là CHÍNH Google — goto thẳng là hợp lệ (không phải
+            # bỏ cổng Google; cổng Google chỉ cho site thứ ba như TikTok/Wiki/báo).
+            print("      + [Cổng Google] Đích là chính Google (Finance) — vào thẳng, không cần gõ Search.")
             page.goto("https://www.google.com/finance/", wait_until="domcontentloaded", timeout=45000)
             self.random_sleep(3, 5)
             self.restore_mouse_position(page)
@@ -1169,7 +1175,7 @@ class WarmupWorkflow:
             # Quay xổ số quyết định hành vi tìm kiếm (50/50)
             if random.random() < 0.5:
                 # CÁCH 1: Giả lập gõ thẳng từ khóa lên thanh URL (Omnibox)
-                print(f"      + Quyết định: Gõ trực tiếp lên thanh địa chỉ URL từ khóa '{query}'.")
+                print(f"      + Quyết định: Gõ trực tiếp lên thanh địa chỉ URL từ khóa '{query}' (đích là chính Google — hợp lệ, không cần cổng).")
                 # Xử lý khoảng trắng và dấu tiếng Việt thành định dạng URL chuẩn (vd: thời+tiết)
                 encoded_query = urllib.parse.quote_plus(query)
                 page.goto(f"https://www.google.com/search?q={encoded_query}", wait_until="domcontentloaded", timeout=45000)
@@ -1442,6 +1448,14 @@ class WarmupWorkflow:
         KHÔNG bao giờ goto thẳng link đích. Trả về True nếu cuối cùng đáp đúng site."""
         try:
             print(f"      + [Google] Mở Google để tìm '{keyword} {target_domain}' (không vào thẳng)...")
+            # v1.4.6: nếu tab ĐANG ở Google sẵn (rất hay xảy ra — ví dụ vừa chết
+            # trên trang kết quả), goto google.com không đổi gì trên màn hình ->
+            # đọc log cũ dễ hiểu nhầm là "bỏ qua bước gõ". Nói rõ để khỏi nghi.
+            try:
+                if "google.com" in (page.url or "").lower():
+                    print("      + [Google] Tab đang ở Google sẵn — mở lại trang chủ Google rồi gõ lại từ khóa (KHÔNG phải bỏ cổng Google).")
+            except Exception:
+                pass
             try:
                 page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=45000)
             except Exception as goto_err:
@@ -1696,7 +1710,7 @@ class WarmupWorkflow:
                 if vcount > 0:
                     feed_ok = True
                     break
-                print(f"      [!] Trang hiện tại không có video nào phát (lần {attempt + 1}/2) - chuyển về feed For You...")
+                print(f"      [!] Trang hiện tại không có video nào phát (lần {attempt + 1}/2) - chuyển về feed For You... (đích vẫn là TikTok — không phải bỏ cổng Google)")
                 try:
                     page.goto("https://www.tiktok.com/foryou", wait_until="domcontentloaded", timeout=60000)
                 except Exception as goto_err:
@@ -1736,7 +1750,9 @@ class WarmupWorkflow:
                 print(f"      + Đang xem trong {watch_time:.0f}s...")
                 watched = 0
                 while watched < watch_time:
-                    chunk = random.uniform(3, 6)
+                    # v1.4.6: chunk bị chặn bởi thời gian còn lại — log không còn
+                    # in "(30/27s)" (xem vượt 100% do độ hạt của chunk)
+                    chunk = min(random.uniform(3, 6), watch_time - watched)
                     time.sleep(chunk)
                     watched += chunk
                     # v1.4.3: in nhịp tim để người xem không thấy log "đứng im" im lặng
@@ -2338,12 +2354,18 @@ class WarmupWorkflow:
         return False
 
     def _parse_time(self, time_str):
-        parts = time_str.split(":")
-        if len(parts) == 2:
-            return int(parts[0]) * 60 + int(parts[1])
-        elif len(parts) == 3:
-            return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
-        return 120
+        # v1.4.6: rỗng/không parse được -> trả 0 (trước đây trả 120, làm chết
+        # fallback `random.randint(180, 300)` của _watch_single_video_logic —
+        # video thiếu badge .ytp-time-duration bị chốt cứng xem 66-108s).
+        parts = (time_str or "").strip().split(":")
+        try:
+            if len(parts) == 2:
+                return int(parts[0]) * 60 + int(parts[1])
+            elif len(parts) == 3:
+                return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+        except ValueError:
+            pass
+        return 0
 
     # ==========================================
     # TASK 5 — LOG ACTIVITY (reporting thuần, không ảnh hưởng hành vi bot)
@@ -2440,17 +2462,45 @@ class WarmupWorkflow:
             
             watch_percent = random.uniform(0.55, 0.9)
             watch_seconds = int(total_seconds * watch_percent)
-            
-            print(f"      + Thời lượng thực: {total_seconds}s. Sẽ xem: {watch_percent*100:.1f}% (~{watch_seconds}s).")
-            
+
+            # v1.4.7: CAP thời lượng xem/video — người thật BỎ DỞ video dài,
+            # không ngồi 20+ phút cho MỘT video (E2E 17/10: video 45 phút ->
+            # bot định xem 1568s = 26 phút, log im lặng = "đứng im"). Video
+            # ngắn (watch_seconds <= cap) giữ nguyên hành vi % thời lượng thật.
+            cap_seconds = random.randint(240, 420)
+            capped = watch_seconds > cap_seconds
+            if capped:
+                watch_seconds = cap_seconds
+            if capped:
+                print(f"      + Thời lượng thực: {total_seconds}s. Sẽ xem: ~{watch_seconds}s (bỏ dở — cap {cap_seconds}s, kiểu người thật không cày hết video dài).")
+            else:
+                print(f"      + Thời lượng thực: {total_seconds}s. Sẽ xem: {watch_percent*100:.1f}% (~{watch_seconds}s).")
+
             # 3. Tiến hành xem và lướt qua ad giữa video
+            # v1.4.6: clamp — giấc nghỉ giữa video bị chặn bởi thời gian CÒN LẠI,
+            # để tổng thời gian xem không vượt watch_seconds (log từng ghi
+            # "30/27s" = xem 30s cho video 27s).
+            # v1.4.7: thêm nhịp tim log (như vòng TikTok) — chống "đứng im".
             end_time = time.time() + watch_seconds
+            watched = 0.0
+            next_beat = 0.0
             while time.time() < end_time:
                 if self.stop_requested:
                     print("      + [Stop] Nhận yêu cầu dừng - kết thúc sớm video đang xem.")
                     break
                 self._check_and_skip_ad(page)
-                self.random_sleep(4, 8)
+                remaining = end_time - time.time()
+                if remaining <= 0:
+                    break
+                nap = min(random.uniform(4, 8), remaining)
+                if self.stop_requested:
+                    break
+                time.sleep(nap)
+                watched += nap
+                # v1.4.7: nhịp tim mỗi ~20-30s trong lúc xem video YouTube
+                if watched >= next_beat:
+                    print(f"         ...đang xem video YouTube ({watched:.0f}/{watch_seconds}s)")
+                    next_beat = watched + random.uniform(20, 30)
                 if random.random() < 0.15:
                     self._random_youtube_actions(page)
             

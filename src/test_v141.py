@@ -104,11 +104,14 @@ check("3 vòng cũ còn nguyên (không mất dữ liệu)",
 # =====================================================================
 hr("2. log_cycle / get_cycle_rows — round-trip target_s")
 # =====================================================================
-db.log_cycle("PID-A", "2026-10-15T09:00:00", "2026-10-15T09:20:00", 1200.0, "ok",
+# Mốc ngày ĐỘNG (hôm nay) — tránh time-bomb: check "days=1 vẫn thấy vòng hôm nay"
+# mà hardcode ngày sẽ fail sau 1-2 ngày.
+_TODAY = datetime.date.today().isoformat()
+db.log_cycle("PID-A", f"{_TODAY}T09:00:00", f"{_TODAY}T09:20:00", 1200.0, "ok",
              actions=5, phase="clean", target_s=900)
-db.log_cycle("PID-A", "2026-10-15T10:00:00", "2026-10-15T10:05:00", 300.0, "error",
+db.log_cycle("PID-A", f"{_TODAY}T10:00:00", f"{_TODAY}T10:05:00", 300.0, "error",
              actions=2, phase="clean", error="boom", target_s=600)
-db.log_cycle("PID-B", "2026-10-15T09:00:00", "2026-10-15T09:10:00", 600.0, "ok",
+db.log_cycle("PID-B", f"{_TODAY}T09:00:00", f"{_TODAY}T09:10:00", 600.0, "ok",
              actions=4, phase="youtube", target_s=None)
 rows_a = db.get_cycle_rows("PID-A", days=3650)
 check("get_cycle_rows trả 2 dòng PID-A", len(rows_a) == 2, str(len(rows_a)))

@@ -308,9 +308,73 @@ sg = code.split("def action_search_google")[1].split("def ")[0]
 check("action_search_google: co canh bao dead-code (khong nam trong action_map)",
       "KH\u00d4NG n\u1eb1m trong action_map" in sg and "code ch\u1ebft" in sg)
 
+# =====================================================================
+# 4. v1.4.6 — _parse_time tra 0 khi rỗng + clamp 2 vòng xem + nhãn log mới
+# =====================================================================
+print()
+print("=" * 68)
+print("4. v1.4.6: _parse_time / clamp watch / nhan cong Google")
+print("=" * 68)
+
+# _parse_time không đụng self -> gọi thẳng unbound
+pt = WarmupWorkflow._parse_time
+check("_parse_time('') == 0 (truoc day == 120, lam chet fallback 180-300s)",
+      pt(None, "") == 0, repr(pt(None, "")))
+check("_parse_time(None) == 0 (khong crash)", pt(None, None) == 0)
+check("_parse_time('4:30') == 270 (giu hanh vi mm:ss)", pt(None, "4:30") == 270)
+check("_parse_time('1:02:03') == 3723 (giu hanh vi h:mm:ss)", pt(None, "1:02:03") == 3723)
+check("_parse_time('abc') == 0 (ValueError -> 0, khong crash)", pt(None, "abc") == 0)
+check("_parse_time('99') == 0 (1 thanh -> 0)", pt(None, "99") == 0)
+check("_watch_single_video_logic: fallback random(180,300) van con sau _parse_time",
+      "total_seconds = random.randint(180, 300)" in code)
+
+ttk_blk = code.split("def action_watch_tiktok")[1].split("def action_read_wikipedia")[0]
+check("TikTok: chunk xem duoc clamp theo thoi gian con lai (khong con (30/27s))",
+      "chunk = min(random.uniform(3, 6), watch_time - watched)" in ttk_blk)
+
+wsv = code.split("def _watch_single_video_logic")[1]
+wsv = wsv.split("\n    def ")[0]
+check("YouTube: giac nghi clamp theo remaining (nap = min(uniform(4,8), remaining))",
+      "nap = min(random.uniform(4, 8), remaining)" in wsv)
+check("YouTube: co guard remaining <= 0 -> break",
+      "if remaining <= 0:" in wsv and "break" in wsv)
+check("YouTube: clamp chi dung trong vong xem (time.sleep(nap))",
+      "time.sleep(nap)" in wsv)
+# v1.4.7: cap thoi luong xem/video + nhip tim chong "dung im"
+check("YouTube v1.4.7: cap watch_seconds (video ngan giu %, video dai bo do)",
+      "cap_seconds = random.randint(240, 420)" in wsv
+      and "watch_seconds > cap_seconds" in wsv
+      and "watch_seconds = cap_seconds" in wsv)
+check("YouTube v1.4.7: nhan 'bo do - cap' chi in khi bi cap",
+      "(b\u1ecf d\u1edf \u2014 cap" in wsv and "if capped:" in wsv)
+check("YouTube v1.4.7: nhip tim in deu trong vong xem ( nhu TikTok )",
+      "...\u0111ang xem video YouTube (" in wsv
+      and "next_beat = watched + random.uniform(20, 30)" in wsv)
+
+nav = code.split("def _navigate_via_google")[1].split("\n    def ")[0]
+check("Cong Google: nhan 'Tab dang o Google san' khi url da la google.com",
+      'if "google.com" in (page.url or "")' in nav
+      and "Tab \u0111ang \u1edf Google" in nav)
+check("Cong Google: van goto google.com fresh SERP (khong doi logic dieu huong)",
+      'page.goto("https://www.google.com"' in nav)
+
+fin = code.split("def action_google_finance")[1].split("def ")[0]
+check("Finance: nhan 'Dich la chinh Google - vao thang' (ro, khong hieu nham bo cong)",
+      "\u0110\u00edch l\u00e0 ch\u00ednh Google (Finance)" in fin)
+wth = code.split("def action_search_weather")[1].split("def ")[0]
+check("Weather: nhan '(dich la chinh Google - hop le)' o nhanh Omnibox",
+      "\u0111\u00edch l\u00e0 ch\u00ednh Google \u2014 h\u1ee3p l\u1ec7" in wth)
+wv = code.split("def action_watch_video")[1].split("def ")[0]
+check("YouTube-home: nhan 'vao thang (site dich, co y)'",
+      "site \u0111\u00edch, c\u1ed1 \u00fd" in wv)
+check("TikTok guard feed trong: noi ro 'khong phai bo cong Google'",
+      "\u0111\u00edch v\u1eabn l\u00e0 TikTok \u2014 kh\u00f4ng ph\u1ea3i b\u1ecf c\u1ed5ng Google" in ttk_blk)
+check("action_read_news KHONG bi dong (giu check tinh cua test_v141)",
+      "(Fallback Google)" in code.split("def action_read_news")[1].split("def ")[0])
+
 print()
 print("=" * 68)
 print(f"KET QUA: PASS: {PASS}   FAIL: {FAIL}")
 print("=" * 68)
-print("SMOKE v1.4.5: " + ("ALL PASS" if FAIL == 0 else f"{FAIL} FAIL"))
+print("SMOKE v1.4.5+v1.4.6: " + ("ALL PASS" if FAIL == 0 else f"{FAIL} FAIL"))
 sys.exit(1 if FAIL else 0)
