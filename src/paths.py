@@ -58,3 +58,15 @@ def logs_dir():
 
 def backup_dir():
     return _ensure(os.path.join(data_dir(), "backup"))
+
+
+def env_path():
+    """File .env gốc repo (nơi brain_manager đọc API key qua dotenv).
+
+    Không tự tạo file — chỉ trả đường dẫn; api_vault sẽ tạo khi cần ghi.
+    Override: GPM_BOT_ENV_FILE trỏ thẳng file .env khác (tiện cho test cô lập).
+    """
+    env = os.environ.get("GPM_BOT_ENV_FILE")
+    if env:
+        return os.path.abspath(env)
+    return os.path.join(repo_root(), ".env")

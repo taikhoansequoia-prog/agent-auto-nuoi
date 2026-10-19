@@ -24,6 +24,7 @@ from src.agent.brain_manager import BrainManager
 from src.logger import append_line, LOG_DIR
 from src.version import get_version_line
 from src.app_config import load_config, save_config
+from src import api_vault
 
 # ==========================================
 # SPRINT 1.5: nhãn phase "ngôn ngữ người vận hành" -> key nội bộ (warmup.py GIỮ NGUYÊN)
@@ -885,6 +886,10 @@ class AutomationApp:
         self.btn_cycle_time = ttk.Button(card_ctl, text="THỜI GIAN NGÂM (CHU TRÌNH)",
                                          command=self.show_cycle_time_dialog, style="Tool.TButton")
         self.btn_cycle_time.grid(row=7, column=0, columnspan=3, sticky="we", pady=(6, 0))
+        # v1.4.8: tiện ích API key có cổng mật khẩu — khỏi phải sửa .env tay
+        self.btn_api_keys = ttk.Button(card_ctl, text="QUẢN LÝ API KEY (CẦN MẬT KHẨU)",
+                                       command=self.open_api_key_manager, style="Tool.TButton")
+        self.btn_api_keys.grid(row=8, column=0, columnspan=3, sticky="we", pady=(6, 0))
 
         # ---------- Thẻ ngang dưới: cặp từ khóa Google ↔ YouTube (hành vi 1.4 giữ nguyên) ----------
         card_kw = ttk.Labelframe(outer, text="  CẶP TỪ KHÓA — GOOGLE ↔ YOUTUBE  ", padding=(12, 8))
@@ -935,6 +940,13 @@ class AutomationApp:
 
         # Sprint 1.1: khôi phục lựa chọn của phiên trước + tự lưu khi đóng app
         self._apply_loaded_config()
+        # v1.4.8: nạp mọi key trong .env vào os.environ ngay khi mở app — brain
+        # (dotenv + os.getenv) đọc được cả khi EXE chạy với cwd khác.
+        try:
+            _n_keys = api_vault.sync_env_into_process()
+            print(f"[+] Đã nạp {_n_keys} API key từ .env vào phiên chạy.")
+        except Exception as _e:
+            print(f"[!] Nạp .env vào process lỗi (bỏ qua): {_e}")
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._tick_status()
         # Sprint 1.6: mở app là tự kéo danh sách profile từ GPM (im lặng, nền) — khỏi để ô trống
@@ -1465,10 +1477,10 @@ clearly tách nhóm hơn kiểu label trần + separator."""
         brain_type = self.var_brain_type.get()
         hints = {
             "none": "(Tắt AI - dùng từ khóa thủ công)",
-            "gemini": "(Cần GEMINI_API_KEY trong .env)",
-            "openai": "(Cần OPENAI_API_KEY trong .env)",
-            "qwen-max": "(Cần QWEN_API_KEY trong .env)",
-            "qwen-flash": "(Cần QWEN_API_KEY trong .env)",
+            "gemini": "(Cần GEMINI_API_KEY - bấm nút QUẢN LÝ API KEY)",
+            "openai": "(Cần OPENAI_API_KEY - bấm nút QUẢN LÝ API KEY)",
+            "qwen-max": "(Cần QWEN_API_KEY - bấm nút QUẢN LÝ API KEY)",
+            "qwen-flash": "(Cần QWEN_API_KEY - bấm nút QUẢN LÝ API KEY)",
             "local": "(Cần Ollama chạy ở localhost:11434)",
         }
         self.lbl_brain_hint.config(text=hints.get(brain_type, ""))
@@ -2315,7 +2327,7 @@ clearly tách nhóm hơn kiểu label trần + separator."""
         for btn in (self.btn_report, self.btn_open_logs, self.btn_load_keywords,
                     self.btn_refresh_profiles, self.btn_add_manual,
                     self.btn_dashboard, self.btn_export_csv, self.btn_timeline,
-                    self.btn_phase_info, self.btn_cycle_time):
+                    self.btn_phase_info, self.btn_cycle_time, self.btn_api_keys):
             btn.config(state="disabled")
         
         for tab_name in list(self.log_boxes.keys()):
@@ -2386,11 +2398,321 @@ clearly tách nhóm hơn kiểu label trần + separator."""
                 msg = ("Đã dừng theo yêu cầu." if stopped else "Chạy xong") + f" {len(profiles)} profiles."
                 self.root.after(0, lambda: messagebox.showinfo("Hoàn thành", msg))
 
+    # ------------------------------------------------------------------ v1.4.8: API VAULT
+    def open_api_key_manager(self):
+        """Cổng mật khẩu -> dialog quản lý API key trong .env (khỏi sửa file tay)."""
+        if getattr(self, "_api_dialog", None) is not None:
+            try:
+                if self._api_dialog.winfo_exists():
+                    self._api_dialog.lift()
+                    return
+            except Exception:
+                pass
+            self._api_dialog = None
+        self._ask_api_password(self._open_api_key_dialog)
+
+    def _ask_api_password(self, on_ok, change_mode=False):
+        """Dialog mật khẩu phi modal (modal thật sẽ khóa remap theme).
+
+        change_mode=True: ô "Mật khẩu hiện tại" chỉ bắt buộc khi ĐÃ đặt mật khẩu
+        riêng (hash trong config); lần đầu đổi từ mật khẩu khởi điểm thì bỏ trống được.
+        """
+        win = tk.Toplevel(self.root)
+        win.title("Đổi mật khẩu tiện ích API" if change_mode else "Mật khẩu tiện ích API")
+        win.configure(bg=self.C_CARD)
+        win.resizable(False, False)
+        win.transient(self.root)
+        # PHI GRAB: grab sẽ chặn nút "ĐỔI NỀN" ở cửa sổ chính trong lúc dialog mở,
+        # và người dùng có thể cần đổi nền khi đang nhập mật khẩu.
+        box = tk.Frame(win, bg=self.C_CARD, padx=16, pady=14)
+        box.pack(fill="both", expand=True)
+
+        if change_mode:
+            msg = ("Đặt mật khẩu MỚI cho tiện ích API (tối thiểu 4 ký tự).")
+            if not api_vault.has_custom_password():
+                msg += ("\nTiện ích đang dùng mật khẩu khởi điểm — ô \"Mật khẩu hiện tại\" "
+                        "có thể BỎ TRỐNG, hoặc điền mật khẩu khởi điểm.")
+            lbl_head = "Đổi mật khẩu"
+        else:
+            msg = "Nhập mật khẩu để mở tiện ích quản lý API key."
+            lbl_head = "Tiện ích API KEY"
+        tk.Label(box, text=lbl_head, bg=self.C_CARD, fg=self.C_FG,
+                 font=("Segoe UI", 11, "bold")).pack(anchor="w")
+        tk.Label(box, text=msg, bg=self.C_CARD, fg=self.C_MUTED, wraplength=330,
+                 justify="left").pack(anchor="w", pady=(2, 10))
+
+        rows = []
+
+        def _add_row(label):
+            fr = tk.Frame(box, bg=self.C_CARD)
+            fr.pack(fill="x", pady=2)
+            tk.Label(fr, text=label, width=16, anchor="w", bg=self.C_CARD,
+                     fg=self.C_MUTED).pack(side="left")
+            var = tk.StringVar()
+            en = tk.Entry(fr, textvariable=var, show="•", width=26, bg=self.C_FIELD,
+                          fg=self.C_FG, insertbackground=self.C_FG,
+                          highlightbackground=self.C_BORDER)
+            en.pack(side="left")
+            state = {"show": False}
+
+            def _toggle():
+                state["show"] = not state["show"]
+                en.config(show="" if state["show"] else "•")
+                btn.config(text="Ẩn" if state["show"] else "Hiện")
+                en.focus_set()
+
+            btn = tk.Button(fr, text="Hiện", width=5, command=_toggle,
+                            bg=self.C_CARD2, fg=self.C_FG, relief="flat",
+                            activebackground=self.C_CARD, activeforeground=self.C_FG)
+            btn.pack(side="left", padx=(6, 0))
+            rows.append((var, en))
+            return en
+
+        cur_en = _add_row("Mật khẩu hiện tại" if change_mode else "Mật khẩu")
+        new_en = None
+        confirm_en = None
+        if change_mode:
+            new_en = _add_row("Mật khẩu mới")
+            confirm_en = _add_row("Nhập lại")
+
+        err = tk.Label(box, text="", bg=self.C_CARD, fg=self.C_ERR_FG, anchor="w")
+        err.pack(fill="x", pady=(6, 0))
+
+        def _close():
+            win.destroy()
+
+        def _submit(_e=None):
+            cur = cur_en.get()
+            if change_mode:
+                if api_vault.has_custom_password():
+                    if not api_vault.check_password(cur):
+                        err.config(text="Mật khẩu hiện tại không đúng.")
+                        return
+                new = new_en.get()
+                if len(new) < 4:
+                    err.config(text="Mật khẩu mới cần tối thiểu 4 ký tự.")
+                    return
+                if new != confirm_en.get():
+                    err.config(text="Mật khẩu nhập lại không khớp.")
+                    return
+                if api_vault.set_password(new):
+                    print("[+] Đã đổi mật khẩu tiện ích API.")
+                    messagebox.showinfo("Đổi mật khẩu",
+                                        "Mật khẩu mới đã được lưu. Lần mở tiện ích sau dùng mật khẩu này.",
+                                        parent=win)
+                    _close()
+                else:
+                    err.config(text="Không lưu được mật khẩu (lỗi ghi app_config).")
+                return
+            if api_vault.check_password(cur):
+                err.config(text="")
+                _close()
+                on_ok()
+            else:
+                err.config(text="Sai mật khẩu.")
+                cur_en.select_range(0, "end")
+                cur_en.focus_set()
+
+        btns = tk.Frame(box, bg=self.C_CARD)
+        btns.pack(fill="x", pady=(12, 0))
+        ttk.Button(btns, text="Xác nhận", command=_submit).pack(side="right")
+        ttk.Button(btns, text="Hủy", command=_close).pack(side="right", padx=(0, 8))
+
+        win.bind("<Return>", _submit)
+        win.bind("<Escape>", lambda _e: _close())
+        (new_en if change_mode else cur_en).focus_set()
+
+    def _open_api_key_dialog(self):
+        """Dialog chính: liệt kê + sửa/xóa/add key trong .env (best-effort, không ném)."""
+        win = tk.Toplevel(self.root)
+        win.title("Quản lý API KEY")
+        win.configure(bg=self.C_CARD)
+        win.geometry("780x540")
+        win.transient(self.root)
+        self._api_dialog = win
+        win.protocol("WM_DELETE_WINDOW", lambda: (setattr(self, "_api_dialog", None), win.destroy()))
+
+        body = tk.Frame(win, bg=self.C_CARD, padx=12, pady=10)
+        body.pack(fill="both", expand=True)
+
+        tk.Label(body, text=f"File: {api_vault.env_path()}", bg=self.C_CARD,
+                 fg=self.C_MUTED, anchor="w").pack(fill="x")
+        tk.Label(body, text="Key lưu trong .env và nạp thẳng vào os.environ — AI brain dùng được ngay, không cần mở lại app.",
+                 bg=self.C_CARD, fg=self.C_MUTED, anchor="w", wraplength=700,
+                 justify="left").pack(fill="x", pady=(0, 8))
+
+        canvas, inner = self._make_scrollable(body, 330)  # helper đã pack canvas+scrollbar vào body
+
+        rows_fr = tk.Frame(inner, bg=self.C_CARD)
+        rows_fr.pack(fill="x")
+        revealed = {}  # key -> bool (mắt Hiện/ẩn từng dòng, chỉ trong phiên này)
+
+        def _render_rows():
+            for w in rows_fr.winfo_children():
+                w.destroy()
+            try:
+                env_pairs = api_vault.list_keys()
+            except Exception as e:
+                tk.Label(rows_fr, text=f"[!] Không đọc được .env: {e}", bg=self.C_CARD,
+                         fg=self.C_ERR_FG).pack(anchor="w")
+                return
+            env_map = dict(env_pairs)
+            known_names = {k for k, _d in api_vault.KNOWN_KEYS}
+            ordered = list(api_vault.KNOWN_KEYS)
+            ordered += [(k, "") for k, _v in env_pairs if k not in known_names]
+            for name, desc in ordered:
+                val = env_map.get(name, "")
+                fr = tk.Frame(rows_fr, bg=self.C_CARD if name in known_names else self.C_CARD2)
+                fr.pack(fill="x", pady=2, padx=2)
+                lbl_fr = tk.Frame(fr, bg=fr["bg"])
+                lbl_fr.pack(side="left", fill="x", expand=True, padx=(8, 4), pady=5)
+                tk.Label(lbl_fr, text=name, bg=fr["bg"], fg=self.C_ACCENT,
+                         font=("Consolas", 10, "bold")).pack(anchor="w")
+                if desc:
+                    tk.Label(lbl_fr, text=desc, bg=fr["bg"], fg=self.C_MUTED,
+                             font=("Segoe UI", 8, "italic")).pack(anchor="w")
+                shown = val if revealed.get(name) else (api_vault.mask(val) if val else "(trống)")
+                val_lbl = tk.Label(fr, text=shown, bg=fr["bg"], fg=self.C_FG,
+                                   font=("Consolas", 9), width=26, anchor="e")
+                val_lbl.pack(side="left", padx=4)
+
+                eye_btn = tk.Button(fr, text=("Ẩn" if revealed.get(name) else "Hiện"), width=5,
+                                    bg=fr["bg"], fg=self.C_FG, relief="flat",
+                                    activebackground=self.C_CARD,
+                                    activeforeground=self.C_FG)
+
+                def _toggle(name=name, val_lbl=val_lbl, btn=eye_btn):
+                    revealed[name] = not revealed.get(name)
+                    cur = api_vault.get_key(name) or ""
+                    val_lbl.config(text=cur if revealed[name] else (api_vault.mask(cur) if cur else "(trống)"))
+                    btn.config(text="Ẩn" if revealed[name] else "Hiện")
+
+                eye_btn.config(command=_toggle)
+                eye_btn.pack(side="left", padx=2)
+
+                def _edit(name=name, desc=desc):
+                    self._api_key_edit_dialog(name, desc, _refresh)
+
+                def _delete(name=name):
+                    if not messagebox.askyesno("Xóa API key",
+                                               f"Xóa {name} khỏi .env?\n(AI brain đang dùng key này sẽ mất.)",
+                                               parent=win):
+                        return
+                    if api_vault.delete_key(name):
+                        print(f"[+] Đã xóa {name} khỏi .env.")
+                        _refresh()
+                    else:
+                        messagebox.showerror("Lỗi", "Không xóa được — xem log để biết lý do.", parent=win)
+
+                tk.Button(fr, text="Sửa", width=6, command=_edit, bg=fr["bg"], fg=self.C_FG,
+                          relief="flat", activebackground=self.C_CARD,
+                          activeforeground=self.C_FG).pack(side="left", padx=2)
+                tk.Button(fr, text="Xóa", width=6, command=_delete, bg=fr["bg"], fg=self.C_ERR_FG,
+                          relief="flat", activebackground=self.C_CARD,
+                          activeforeground=self.C_FG).pack(side="left", padx=2)
+            if not ordered:
+                tk.Label(rows_fr, text="Chưa có key nào trong .env — bấm \"Thêm key\".",
+                         bg=self.C_CARD, fg=self.C_MUTED).pack(anchor="w", pady=8)
+
+        def _refresh():
+            try:
+                _render_rows()
+            except Exception as e:
+                print(f"[!] Vẽ danh sách API key lỗi: {e}")
+
+        _refresh()
+
+        bar = tk.Frame(win, bg=self.C_CARD, padx=12, pady=10)
+        bar.pack(fill="x")
+        ttk.Button(bar, text="+ Thêm key", style="Tool.TButton",
+                   command=lambda: self._api_key_edit_dialog("", "", _refresh, win)).pack(side="left")
+        ttk.Button(bar, text="Đổi mật khẩu", style="Tool.TButton",
+                   command=lambda: self._ask_api_password(lambda: None, change_mode=True)).pack(side="left", padx=8)
+        ttk.Button(bar, text="Đóng", style="Tool.TButton",
+                   command=win.destroy).pack(side="right")
+
+    def _api_key_edit_dialog(self, name, desc, on_saved, parent=None):
+        """Dialog thêm/sửa 1 key: tên + value (dán được) + Hiện/ẩn + kiểm tra tên trùng."""
+        parent = parent or self._api_dialog
+        is_new = not name
+        win = tk.Toplevel(self.root)
+        win.title("Thêm API key" if is_new else f"Sửa {name}")
+        win.configure(bg=self.C_CARD)
+        win.resizable(False, False)
+        win.transient(parent if parent is not None else self.root)
+        # Phi grab (giống dialog mật khẩu): grab thật sẽ khóa nút đổi nền + bảng liệt kê.
+        win.lift()
+
+        box = tk.Frame(win, bg=self.C_CARD, padx=16, pady=14)
+        box.pack(fill="both", expand=True)
+        if desc:
+            tk.Label(box, text=desc, bg=self.C_CARD, fg=self.C_MUTED, wraplength=340,
+                     justify="left").pack(anchor="w", pady=(0, 8))
+
+        tk.Label(box, text="Tên key (VD: GEMINI_API_KEY)", bg=self.C_CARD, fg=self.C_FG,
+                 anchor="w").pack(fill="x")
+        name_var = tk.StringVar(value=name)
+        name_en = ttk.Entry(box, textvariable=name_var, width=46, font=("Consolas", 10))
+        name_en.pack(fill="x", pady=(2, 8))
+
+        tk.Label(box, text="Giá trị (key) — dán trực tiếp được", bg=self.C_CARD, fg=self.C_FG,
+                 anchor="w").pack(fill="x")
+        val_var = tk.StringVar(value=api_vault.get_key(name) if name else "")
+        val_en = ttk.Entry(box, textvariable=val_var, width=46, font=("Consolas", 10), show="•")
+        val_en.pack(fill="x", pady=(2, 4))
+        if is_new:
+            val_en.config(show="")
+
+        def _toggle_show():
+            val_en.config(show="" if val_en.cget("show") else "•")
+
+        state_fr = tk.Frame(box, bg=self.C_CARD)
+        state_fr.pack(fill="x")
+        tk.Checkbutton(state_fr, text="Hiện giá trị", variable=tk.BooleanVar(value=is_new),
+                       command=_toggle_show, bg=self.C_CARD, fg=self.C_FG,
+                       selectcolor=self.C_FIELD, activebackground=self.C_CARD,
+                       activeforeground=self.C_FG).pack(side="left")
+        if not is_new:
+            tk.Label(box, text="(Đang che — tick \"Hiện giá trị\" để sửa trực tiếp)",
+                     bg=self.C_CARD, fg=self.C_MUTED, font=("Segoe UI", 8, "italic")).pack(anchor="w")
+
+        err = tk.Label(box, text="", bg=self.C_CARD, fg=self.C_ERR_FG, anchor="w",
+                       wraplength=340, justify="left")
+        err.pack(fill="x", pady=(6, 0))
+
+        def _save(_e=None):
+            key_name = name_var.get().strip().upper().replace(" ", "_").replace("-", "_")
+            value = val_var.get().strip()
+            if not key_name or not api_vault._KEY_RE.match(f"{key_name}="):
+                err.config(text="Tên key không hợp lệ (chữ/số/gạch dưới, không bắt đầu bằng số).")
+                return
+            if not value:
+                err.config(text="Giá trị rỗng — muốn gỡ key thì bấm Xóa ở danh sách.")
+                return
+            if is_new and key_name in dict(api_vault.list_keys()):
+                if not messagebox.askyesno("Key đã tồn tại",
+                                           f"{key_name} đã có trong .env. Ghi đè key mới?", parent=win):
+                    return
+            if api_vault.set_key(key_name, value):
+                print(f"[+] Đã lưu {key_name} vào .env + os.environ.")
+                win.destroy()
+                on_saved()
+            else:
+                err.config(text="Không ghi được .env — xem log để biết lý do.")
+
+        btns = tk.Frame(box, bg=self.C_CARD)
+        btns.pack(fill="x", pady=(12, 0))
+        ttk.Button(btns, text="Lưu", command=_save).pack(side="right")
+        ttk.Button(btns, text="Hủy", command=win.destroy).pack(side="right", padx=(0, 8))
+        win.bind("<Return>", _save)
+        win.bind("<Escape>", lambda _e: win.destroy())
+        (name_en if is_new else val_en).focus_set()
+
     def _set_utils_state(self, state):
         for btn in (self.btn_report, self.btn_open_logs, self.btn_load_keywords,
                     self.btn_refresh_profiles, self.btn_add_manual,
                     self.btn_dashboard, self.btn_export_csv, self.btn_timeline,
-                    self.btn_phase_info, self.btn_cycle_time):
+                    self.btn_phase_info, self.btn_cycle_time, self.btn_api_keys):
             btn.config(state=state)
 
     def _apply_log_filter(self):

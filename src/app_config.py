@@ -36,6 +36,10 @@ DEFAULTS = {
     "skip_random_keywords": False,
     "theme": "dark",       # v1.3.3: 'dark' | 'light' — mặc định tối như trước
     "target_cycle_minutes": 0,  # v1.4.0: mục tiêu phút cho 1 chu trình (0 = không giới hạn)
+    # v1.4.8: cổng mật khẩu cho tiện ích "QUẢN LÝ API KEY" (PBKDF2, salt+hash hex;
+    # rỗng = chưa đổi -> tiện ích nhận mật khẩu khởi điểm api_vault.DEFAULT_PASSWORD)
+    "api_gate_salt": "",
+    "api_gate_hash": "",
 }
 
 
