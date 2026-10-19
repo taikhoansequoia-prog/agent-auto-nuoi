@@ -935,6 +935,11 @@ class AutomationApp:
 
         self.log_boxes = {}
         self._create_tab("MAIN")
+        # v1.4.9: tab "THỜI LƯỢNG CHẠY" — LUÔN tạo SAU MAIN và được nối lại vào CUỐI
+        # notebook mỗi lần Start, nên tabs()[slot_index + 1] của update_tab_name không lệch.
+        self.board_frame = None
+        self.var_board_days = None
+        self._create_board_tab()
 
         sys.stdout = ThreadSafeStdout(self.append_log)
 
@@ -1041,6 +1046,275 @@ class AutomationApp:
             except Exception:
                 pass
         self.root.after(0, _update)
+
+    # ==========================================================
+    # v1.4.9: BOARD THỜI LƯỢNG CHẠY — tab riêng, luôn nhìn thấy
+    # ==========================================================
+    BOARD_COLUMNS = ("name", "group", "id", "running", "cycles", "today", "total_all",
+                     "avg", "actions", "first", "days", "last_dur", "result", "last_at")
+    BOARD_HEADERS = {"name": "Tài khoản", "group": "Nhóm", "id": "ID", "running": "Đang chạy",
+                     "cycles": "Số vòng", "today": "Hôm nay", "total_all": "Tổng mọi thời",
+                     "avg": "TB/vòng", "actions": "Hành động", "first": "Ngày đầu",
+                     "days": "Ngày ngâm", "last_dur": "Vòng cuối", "result": "Kết quả",
+                     "last_at": "Xong lúc"}
+    BOARD_WIDTHS = {"name": 152, "group": 92, "id": 74, "running": 88, "cycles": 58,
+                    "today": 74, "total_all": 94, "avg": 70, "actions": 74, "first": 90,
+                    "days": 68, "last_dur": 70, "result": 100, "last_at": 112}
+    # Cột sort theo SỐ (raw trong self._board_raw); các cột còn lại sort theo chuỗi.
+    BOARD_NUM_COLS = ("running", "cycles", "today", "total_all", "avg", "actions",
+                      "days", "last_dur")
+
+    def _create_board_tab(self):
+        """Tạo (hoặc tạo lại) tab "THỜI LƯỢNG CHẠY". Tab LUÔN nằm CUỐI notebook, nên
+        công thức tabs()[slot_index + 1] của update_tab_name không bị lệch khi chạy.
+        Không đăng ký vào log_boxes (tab này là bảng, không phải khung log)."""
+        old = getattr(self, "board_frame", None)
+        if old is not None:
+            try:
+                old.destroy()
+            except Exception:
+                pass
+        # Giữ cửa sổ ngày đã chọn giữa các lần tạo lại (Start tạo lại tab này)
+        _prev_days = "30"
+        try:
+            if self.var_board_days is not None:
+                _prev_days = self.var_board_days.get()
+        except Exception:
+            pass
+
+        frame = ttk.Frame(self.notebook)
+        self.notebook.add(frame, text=" THỜI LƯỢNG CHẠY ")
+        self.board_frame = frame
+
+        bar = ttk.Frame(frame, padding=(10, 8, 10, 2))
+        bar.pack(fill="x")
+        ttk.Label(bar, text="Mỗi lần BẮT ĐẦU CHẠY 1 profile = 1 chu trình (lỗi/dừng giữa vòng vẫn ghi).",
+                  style="Muted.TLabel").pack(side="left")
+        ttk.Button(bar, text="Làm mới", width=9, command=lambda: refresh()).pack(side="right")
+        self.var_board_days = tk.StringVar(value=_prev_days)
+        ttk.Label(bar, text="Cửa sổ:").pack(side="right", padx=(4, 0))
+        self.cbo_board_days = ttk.Combobox(bar, textvariable=self.var_board_days,
+                                           values=["7", "30", "90", "Tất cả"],
+                                           state="readonly", width=7)
+        self.cbo_board_days.pack(side="right", padx=(4, 10))
+        self.cbo_board_days.bind("<<ComboboxSelected>>", lambda e: refresh())
+
+        body = ttk.Frame(frame)
+        body.pack(fill="both", expand=True, padx=10, pady=(4, 0))
+        tree = ttk.Treeview(body, columns=self.BOARD_COLUMNS, show="headings")
+        self.board_tree = tree
+        for col in self.BOARD_COLUMNS:
+            tree.heading(col, text=self.BOARD_HEADERS[col], command=lambda c=col: sort_by(c))
+            tree.column(col, width=self.BOARD_WIDTHS[col],
+                        anchor="w" if col in ("name", "group", "first", "result", "last_at") else "center")
+        scroll = ttk.Scrollbar(body, command=tree.yview)
+        tree.configure(yscrollcommand=scroll.set)
+        scroll.pack(side="right", fill="y")
+        tree.pack(side="left", fill="both", expand=True)
+
+        self._board_status = ttk.Label(frame, text="", style="Muted.TLabel")
+        self._board_status.pack(anchor="w", padx=12, pady=(4, 0))
+        ttk.Label(frame,
+                  text="Double-click một dòng để xem phân tích hành động/nền tảng của profile đó. "
+                       "Bảng tự tươi mỗi 15 giây khi app đang chạy. ⏰ = vòng này đã vượt mục tiêu của nó.",
+                  style="Muted.TLabel").pack(anchor="w", padx=12, pady=(0, 8))
+
+        # Bind cả virtual event để test mở được dialog (Tk build này cấm event_generate("<Double-1>")).
+        tree.bind("<Double-1>", lambda e: show_breakdown())
+        tree.bind("<<ShowBoardBreakdown>>", lambda e: show_breakdown())
+
+        self._board_raw = {}
+        _sort = {"col": None, "rev": False}
+
+        def days_window():
+            """-> (số ngày, nhãn hiển thị). 'Tất cả' = 3650 ngày (quy ước sẵn có của codebase)."""
+            try:
+                if self.var_board_days.get().strip().lower() in ("tất cả", "tat ca", "all"):
+                    return 3650, "mọi thời"
+                return int(self.var_board_days.get()), None
+            except (ValueError, tk.TclError):
+                return 30, None
+
+        def refresh():
+            for item in tree.get_children():
+                tree.delete(item)
+            self._board_raw = {}
+            days, _lbl = days_window()
+            tgt = self._target_secs()
+            try:
+                db = DatabaseHandler()
+                cyc = db.get_cycle_summary(days=days, target_s=tgt)
+                life = db.get_cycle_lifetime_stats()
+            except Exception as e:
+                self._board_status.config(text=f"Lỗi đọc DB: {e}")
+                return
+            # Union: profile trong checklist + mọi profile có dữ liệu DB (kể cả đã bỏ khỏi checklist)
+            known = {r["id"]: r for r in (self.profile_rows or [])}
+            pids, seen = [], set()
+            for pid in list(known.keys()) + list(cyc.keys()) + list(life.keys()):
+                if pid and pid not in seen:
+                    seen.add(pid)
+                    pids.append(pid)
+            running_pid = {pid: key for key, pid in SLOT_PROFILE.items()}
+            now = time.time()
+            n_cyc = tot_win = tot_all = acts_all = 0
+            today_all = 0.0
+            for pid in pids:
+                r = known.get(pid, {})
+                d = cyc.get(pid, {})
+                lf = life.get(pid, {})
+                cycles = d.get("cycles", 0)
+                cycles_all = lf.get("cycles_all", 0)
+                # Cột "Đang chạy" — realtime từ SLOT_* của worker (mốc so = của CHÍNH vòng này)
+                key = running_pid.get(pid)
+                ci = SLOT_CYCLE_INFO.get(key, {}) if key else {}
+                t_run = ci.get("target_s") or tgt
+                run_txt, run_s = "", None
+                if key:
+                    t0 = SLOT_CYCLE_START.get(key)
+                    if t0 and SLOT_THREAD_ALIVE.get(key, False):
+                        run_s = now - t0
+                        run_txt = _fmt_dur(run_s) + (" ⏰" if t_run and run_s >= t_run else "")
+                st = d.get("last_status") or lf.get("last_status") or ""
+                err = (d.get("last_error") or lf.get("last_error") or "").strip()
+                if st == "ok":
+                    res = "OK"
+                elif st == "error":
+                    res = "LOI" + ((" " + err[:34]) if err else "")
+                elif st == "stopped":
+                    res = "Dung giua vong"
+                else:
+                    res = "-" if cycles_all else ""
+                today_s = lf.get("today_s", 0.0)
+                iid = tree.insert("", tk.END, values=(
+                    (r.get("name") or pid)[:42],
+                    (r.get("group") or UNGROUPED_LABEL)[:16] if cycles_all else "",
+                    pid[:8],
+                    run_txt,
+                    cycles or "",
+                    _fmt_dur(today_s) if today_s else "",
+                    _fmt_dur(lf.get("total_all_s")) if cycles_all else "",
+                    _fmt_dur(d.get("avg_s")) if cycles else "",
+                    lf.get("actions_all") or "",
+                    (lf.get("first_at") or "")[:10],
+                    lf.get("days_active") or "",
+                    _fmt_dur(d.get("last_duration_s") if d.get("last_duration_s") is not None
+                             else lf.get("last_duration_s"))
+                    if (d.get("last_duration_s") is not None or lf.get("last_duration_s") is not None)
+                    else "",
+                    res,
+                    ((d.get("last_at") or lf.get("last_at") or "")[:19]).replace("T", " "),
+                ))
+                # Cột trống -> None (chứ không phải 0) de profile chua chay luon roi xuong
+                # day khi sort, khong bi "ho" voi vong 0 giay that.
+                self._board_raw[iid] = {
+                    "pid": pid, "running": run_s,
+                    "cycles": cycles if cycles else None,
+                    "today": today_s if today_s else None,
+                    "total_all": lf.get("total_all_s") if cycles_all else None,
+                    "avg": d.get("avg_s") if cycles else None,
+                    "actions": lf.get("actions_all") if cycles_all else None,
+                    "days": lf.get("days_active") if cycles_all else None,
+                    "last_dur": (d.get("last_duration_s")
+                                 if d.get("last_duration_s") is not None
+                                 else (lf.get("last_duration_s") if cycles_all else None)),
+                }
+                n_cyc += cycles
+                tot_win += d.get("total_s", 0) or 0
+                tot_all += lf.get("total_all_s", 0.0)
+                acts_all += lf.get("actions_all", 0)
+                today_all += today_s
+            txt = f"{len(pids)} profile · {n_cyc} vòng trong cửa sổ đang chọn · tổng {_fmt_dur(tot_win)}"
+            txt += f" · hôm nay {_fmt_dur(today_all)} · mọi thời {_fmt_dur(tot_all)} · {acts_all} hành động"
+            self._board_status.config(text=txt)
+
+        def sort_by(col):
+            """Sort theo cột; click lại cột đang sort = đảo chiều (header hiện ▲/▼).
+            Click ĐẦU TIÊN: cột số -> giảm dần (profile ngâm nhiều nhất trên đầu),
+            cột chữ -> tăng dần. Ô thiếu dữ liệu (None) luôn nằm CUỐI dù sort chiều nào."""
+            reverse = (not _sort["rev"]) if _sort["col"] == col else (col in self.BOARD_NUM_COLS)
+            allitems = list(tree.get_children())
+            if col in self.BOARD_NUM_COLS:
+                have = [i for i in allitems
+                        if self._board_raw.get(i, {}).get(col) is not None]
+                miss = [i for i in allitems
+                        if self._board_raw.get(i, {}).get(col) is None]
+                have.sort(key=lambda i: self._board_raw[i][col], reverse=reverse)
+                items = have + miss
+            else:
+                items = sorted(allitems,
+                               key=lambda i: str(tree.set(i, col)).lower(),
+                               reverse=reverse)
+            for idx, iid in enumerate(items):
+                tree.move(iid, "", idx)
+            _sort["rev"] = reverse
+            _sort["col"] = col
+            for c in self.BOARD_COLUMNS:
+                mark = ""
+                if c == col:
+                    mark = " ▼" if reverse else " ▲"
+                tree.heading(c, text=self.BOARD_HEADERS[c] + mark)
+
+        def show_breakdown(_event=None):
+            sel = tree.selection()
+            if not sel:
+                return
+            pid = self._board_raw.get(sel[0], {}).get("pid")
+            if not pid:
+                return
+            days, _lbl = days_window()
+            name = (tree.set(sel[0], "name") or pid[:8])
+            try:
+                rows = DatabaseHandler().get_activity_summary(pid, days=days)
+            except Exception as e:
+                messagebox.showerror("Lỗi", f"Không đọc được activity: {e}", parent=self.root)
+                return
+            dlg = tk.Toplevel(frame.winfo_toplevel())
+            dlg.title(f"Hành động — {name}")
+            dlg.configure(bg=self.C_CARD)
+            dlg.geometry("880x430")
+            ttk.Label(dlg, text=f"Phân tích hành động/nền tảng của {pid} trong {days} ngày "
+                                f"(nguồn: activity_history).",
+                      style="Muted.TLabel").pack(anchor="w", padx=12, pady=(10, 4))
+            t2 = ttk.Treeview(dlg, columns=("action", "platform", "count", "errors",
+                                            "avg", "total", "last"),
+                              show="headings")
+            for col, txt in (("action", "Hành động"), ("platform", "Nền tảng"), ("count", "Số lần"),
+                             ("errors", "Lỗi"), ("avg", "TB/lần"), ("total", "Tổng"),
+                             ("last", "Lần cuối")):
+                t2.heading(col, text=txt)
+                t2.column(col, width={"action": 190, "platform": 110, "count": 62, "errors": 52,
+                                      "avg": 76, "total": 84, "last": 122}[col],
+                          anchor="w" if col in ("action", "platform", "last") else "center")
+            s2 = ttk.Scrollbar(dlg, command=t2.yview)
+            t2.configure(yscrollcommand=s2.set)
+            s2.pack(side="right", fill="y")
+            t2.pack(fill="both", expand=True, padx=(12, 0), pady=(0, 4))
+            tot_min = 0.0
+            for row in rows:
+                t2.insert("", tk.END, values=(
+                    row.get("action") or "", row.get("platform") or "",
+                    row.get("count") or 0, row.get("errors") or 0,
+                    _fmt_dur(row.get("avg_duration_s")),
+                    _fmt_dur(row.get("total_duration_s")),
+                    (row.get("last_at") or "")[:19].replace("T", " "),
+                ))
+                tot_min += row.get("total_duration_s") or 0
+            ttk.Label(dlg, text=f"{len(rows)} loại hành động · tổng thời gian hoạt động {_fmt_dur(tot_min)}",
+                      style="Muted.TLabel").pack(anchor="w", padx=12, pady=(0, 6))
+            ttk.Button(dlg, text="Đóng", command=dlg.destroy).pack(anchor="e", padx=12, pady=(0, 10))
+
+        refresh()
+
+        # Tự tươi 15s (chỉ khi tab còn tồn tại — vòng cũ tự chết khi frame bị destroy lúc Start)
+        def _auto():
+            try:
+                if frame.winfo_exists():
+                    refresh()
+                    self.root.after(15000, _auto)
+            except Exception:
+                pass
+        self.root.after(15000, _auto)
 
     # ==========================================================
     # SPRINT 1: khung cuộn được (checklist profile + cặp từ khóa)
@@ -2341,6 +2615,9 @@ clearly tách nhóm hơn kiểu label trần + separator."""
         n_slots = min(max_workers, len(profiles))
         for i in range(n_slots):
             self._create_tab(f"Slot {i + 1}")
+        # v1.4.9: vòng forget ở trên đã gỡ tab thời lượng -> nối lại vào CUỐI cùng,
+        # để slot vẫn nằm ở index 1..n_slots (công thức tabs()[slot+1] giữ nguyên).
+        self._create_board_tab()
 
         self._running = True
         self._active_slots = list(range(n_slots))

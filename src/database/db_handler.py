@@ -592,6 +592,52 @@ class DatabaseHandler:
             print(f"[!] get_cycle_rows lỗi (bỏ qua): {e}")
             return []
 
+    def get_cycle_lifetime_stats(self):
+        """v1.4.9: thống kê TRỌN ĐỜI mỗi profile từ cycle_history (không lọc cửa sổ ngày),
+        cho Board thời lượng. pid -> {cycles_all, total_all_s, today_s, actions_all,
+                                      first_at, days_active, last_status, last_error,
+                                      last_duration_s, last_at}
+            today_s     = tổng giây NGÂM HÔM NAY (theo ngày giờ máy)
+            actions_all = SỐ HÀNH ĐỘNG lũy kế (tổng cột actions)
+            first_at    = lần chạy đầu tiên (MIN started_at)
+            days_active = số NGÀY KHÁC CÓ chạy (COUNT DISTINCT date(started_at))
+        Best-effort: bảng chưa có / DB trống -> {}.
+        """
+        out = {}
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.execute(
+                "SELECT profile_id, COUNT(*), SUM(duration_s),"
+                " SUM(CASE WHEN date(finished_at) = date('now','localtime')"
+                "     THEN duration_s ELSE 0 END),"
+                " SUM(COALESCE(actions, 0)), MIN(started_at),"
+                " COUNT(DISTINCT date(started_at))"
+                " FROM cycle_history GROUP BY profile_id",
+            )
+            for pid, cycles, total_s, today_s, acts, first_at, days_active in cursor.fetchall():
+                out[pid] = {"cycles_all": cycles or 0,
+                            "total_all_s": total_s or 0.0,
+                            "today_s": today_s or 0.0,
+                            "actions_all": acts or 0,
+                            "first_at": first_at,
+                            "days_active": days_active or 0}
+            # v1.4.9: row CUỐI MỌI THỜI — board vẫn hiện "Kết quả"/"Xong lúc" cho profile
+            # có vòng nằm NGOÀI cửa sổ ngày đang chọn (không bị hiểu nhầm là chưa chạy).
+            cursor = conn.execute(
+                "SELECT profile_id, status, error, duration_s, finished_at FROM cycle_history"
+                " WHERE id IN (SELECT MAX(id) FROM cycle_history GROUP BY profile_id)",
+            )
+            for pid, status, err, dur, fin in cursor.fetchall():
+                if pid in out:
+                    out[pid]["last_status"] = status or ""
+                    out[pid]["last_error"] = err or ""
+                    out[pid]["last_duration_s"] = dur
+                    out[pid]["last_at"] = fin or ""
+            conn.close()
+        except Exception as e:
+            print(f"[!] get_cycle_lifetime_stats lỗi (bỏ qua): {e}")
+        return out
+
     def get_last_cycle_targets(self, days=30):
         """v1.4.1: mục tiêu (giây) của VÒNG MỚI NHẤT mỗi profile trong `days` ngày:
         pid -> target_s (float). Dùng cho Bảng tài khoản (⏰ so với vòng cuối). Lỗi -> {}."""
