@@ -2,6 +2,17 @@ import hashlib
 import random
 import time
 
+
+def _fmt_session_dur(seconds):
+    """Định dạng giây -> '45s' / '12m30s' cho log giới hạn phiên (v1.5.2)."""
+    try:
+        s = int(max(0, float(seconds)))
+    except Exception:
+        return "?"
+    if s < 60:
+        return f"{s}s"
+    return f"{s // 60}m{s % 60:02d}s"
+
 class WarmupWorkflow:
     def __init__(self, context, db_handler=None, profile_id=None, needs_sub=False, session_theme=None, skip_youtube=False, skip_random_keywords=False, brain=None, phase="clean", should_stop=None):
         self.context = context
@@ -30,6 +41,13 @@ class WarmupWorkflow:
         }
         # v1.4.5: nhớ selector popup đã báo lần cuối -> chống log lặp (xem _close_popups)
         self._popup_sel_memo = None
+        # v1.5.2: KẾ HOẠCH CỤM — 1 chủ đề xuyên suốt -> chuỗi sub-query nối nhau
+        # (google/youtube/maps/news/wikipedia/tiktok). Rỗng = chưa có kế hoạch ->
+        # mọi action fallback về session_theme (hành vi cũ, brain=None vẫn chạy y hệt).
+        self.plan_steps = []
+        self._plan_used = set()
+        # v1.5.2: trần thời gian THỰC của phiên (giây). 0 = không giới hạn.
+        self.session_deadline_s = 0
 
     @property
     def stop_requested(self):
@@ -92,6 +110,164 @@ class WarmupWorkflow:
         return None
 
     # ==========================================
+    # v1.5.2 — KẾ HOẠCH CỤM (1 chủ đề xuyên suốt -> chuỗi sub-query nối nhau)
+    # ==========================================
+
+    # Nền tảng hợp lệ trong kế hoạch + alias khi parse output của AI.
+    _PLAN_ALIASES = {
+        "google": "google", "tìm kiếm": "google", "tim kiem": "google", "search": "google",
+        "youtube": "youtube", "yt": "youtube", "video": "youtube",
+        "maps": "maps", "bản đồ": "maps", "ban do": "maps", "google maps": "maps",
+        "news": "news", "tin tức": "news", "tin tuc": "news", "báo": "news", "bao": "news",
+        "wikipedia": "wikipedia", "wiki": "wikipedia",
+        "tiktok": "tiktok", "tt": "tiktok",
+    }
+    _PLAN_PLATFORMS = ("google", "youtube", "maps", "news", "wikipedia", "tiktok")
+
+    def _safe_ask_plan(self, topic_hint="", max_steps=14):
+        """Hỏi AI sinh KẾ HOẠCH CỤM: 1 chủ đề xuyên suốt -> chuỗi bước nối nhau kiểu
+        người thật nghiên cứu (tìm cách làm -> xem hướng dẫn -> tìm đồ liên quan -> tìm
+        địa điểm trên Maps...). Trả về list [{"platform", "query"}] hoặc None nếu lỗi.
+
+        Định dạng xin: mỗi dòng "<nền tảng> | <từ khóa>". Parse CỰC kỳ phòng thủ:
+        dòng nào không hiểu được thì bỏ qua, không bao giờ ném exception.
+        """
+        if not self.brain:
+            return None
+        try:
+            n_min, n_max = 8, min(max_steps, 14)
+            prompt = (
+                "Bạn là người dùng Việt Nam đang nghiên cứu một chủ đề trên mạng trong 15-30 phút.\n"
+                f"Chủ đề xuyên suốt của phiên hôm nay: {topic_hint or 'tự chọn một chủ đề đời thường'}.\n"
+                f"Hãy lập một kế hoạch gồm {n_min}-{n_max} bước TÌM KIẾM NỐI NHAU xoay quanh chủ đề đó, theo kiểu "
+                "người thật đào sâu dần: tìm hiểu cách làm, xem video hướng dẫn, tìm đồ dụng/công cụ liên quan, "
+                "tìm địa điểm/hạng mục gần nhà trên Google Maps, đọc tin tức, đọc Wikipedia, lướt TikTok.\n"
+                "Yêu cầu:\n"
+                "- Các bước PHẢI liên quan chuỗi tới chủ đề (bước sau kế thừa bước trước), không lan man.\n"
+                "- Mỗi dòng duy nhất, định dạng: <nền tảng> | <từ khóa 3-8 từ>\n"
+                "- nền tảng chỉ được chọn trong: google, youtube, maps, news, wikipedia, tiktok.\n"
+                "- Từ khóa giữ ngôn ngữ tự nhiên như người dùng thật gõ (tiếng Việt nếu chủ đề tiếng Việt).\n"
+                "- Không đánh số, không giải thích, không dấu ngoặc, không dòng trống."
+            )
+            result = self.brain.ask_text(prompt)
+            steps = self._parse_plan_text(result)
+            if len(steps) >= 4:
+                print(f"  [AI] Kế hoạch cụm ({len(steps)} bước) cho chủ đề "
+                      f"'{topic_hint or 'tự chọn'}':")
+                for i, s in enumerate(steps, 1):
+                    print(f"        {i}. [{s['platform']}] {s['query']}")
+                return steps
+            print(f"  [!] Kế hoạch AI trả về quá ít bước hợp lệ ({len(steps)}) - dùng bộ bước dự phòng.")
+        except Exception as e:
+            print(f"  [!] Lỗi khi hỏi AI kế hoạch cụm: {e}")
+        return None
+
+    def _parse_plan_text(self, raw):
+        """Parse text kế hoạch thành list [{'platform','query'}]. Không hiểu -> bỏ dòng đó."""
+        steps, seen = [], set()
+        if not raw:
+            return steps
+        for line in str(raw).splitlines():
+            txt = line.strip().lstrip("-*•\t ").strip()
+            # bỏ số thứ tự đầu dòng: "1." "2)" "3-"
+            while txt and txt[0].isdigit():
+                txt = txt[1:].lstrip(".)- \t")
+            if not txt or "|" not in txt:
+                continue
+            left, _, right = txt.partition("|")
+            key = left.strip().strip('"\'').lower()
+            plat = self._PLAN_ALIASES.get(key)
+            if plat is None:
+                # cho phép "Google Maps | ..." hoặc "tìm kiếm google | ..."
+                for alias, canon in self._PLAN_ALIASES.items():
+                    if alias in key:
+                        plat = canon
+                        break
+            if plat is None:
+                continue
+            query = right.strip().strip('"\'').strip(" .·-")
+            if not query or len(query) > 90:
+                continue
+            dedupe = (plat, query.lower())
+            if dedupe in seen:
+                continue
+            seen.add(dedupe)
+            steps.append({"platform": plat, "query": query})
+        return steps[:14]
+
+    def _local_plan_steps(self, topic=""):
+        """Bộ bước dự phòng khi KHÔNG có AI Brain (brain=None) — vẫn giữ đúng tinh thần
+        'một chủ đề xuyên suốt, đào sâu dần', sinh từ template + RNG per-profile."""
+        base = (topic or "sức khỏe").strip().lower()
+        pool = [
+            ("google", base),
+            ("google", f"hướng dẫn {base}"),
+            ("news", f"tin tức {base}"),
+            ("wikipedia", base),
+            ("youtube", f"{base} cho người mới"),
+            ("google", f"đồ dùng cần thiết cho {base}"),
+            ("maps", f"cửa hàng {base} gần đây"),
+            ("maps", f"{base} ngoài trời gần đây"),
+            ("google", f"sai lầm thường gặp khi {base}"),
+            ("youtube", f"{base} thực tế"),
+            ("tiktok", base),
+            ("news", f"xu hướng {base}"),
+        ]
+        # Gom theo nền tảng để BẢO ĐẢM mỗi nền tảng có mặt trong chuỗi bước
+        # (kế hoạch dự phòng mà thiếu Maps/YouTube thì mất luôn tinh thần v1.5.2).
+        by_plat = {}
+        for plat_name, query in pool:
+            by_plat.setdefault(plat_name, []).append({"platform": plat_name, "query": query})
+        for lst in by_plat.values():
+            self.rng.shuffle(lst)
+
+        # Bước mở màn luôn là "google" (tìm hiểu chung về chủ đề) rồi đến
+        # mỗi nền tảng khác đúng 1 bước, thứ tự xáo trộn, phần dư điền sau.
+        picks = []
+        if by_plat.get("google"):
+            picks.append(by_plat["google"].pop(0))
+        must = [p for p in ("youtube", "maps", "wikipedia", "news", "tiktok") if by_plat.get(p)]
+        mandatory = [by_plat[p].pop(0) for p in must]
+        self.rng.shuffle(mandatory)
+        leftovers = [s for lst in by_plat.values() for s in lst]
+        self.rng.shuffle(leftovers)
+        picks.extend(mandatory)
+        picks.extend(leftovers)
+        return picks[: max(6, min(10, len(picks)))]
+
+    def _next_plan_step(self, platform):
+        """Lấy bước kế tiếp của kế hoạch KHỚP với nền tảng của action đang chạy.
+
+        Trả về chuỗi từ khóa (và ghi nhớ đã dùng) hoặc None khi kế hoạch hết bước
+        cho nền tảng đó -> caller fallback về session_theme (hành vi cũ).
+        """
+        if not self.plan_steps:
+            return None
+        # ưu tiên bước cùng nền tảng, chưa dùng, theo đúng thứ tự kế hoạch
+        for i, s in enumerate(self.plan_steps):
+            if i in self._plan_used:
+                continue
+            if s.get("platform") != platform:
+                continue
+            self._plan_used.add(i)
+            q = (s.get("query") or "").strip()
+            if q:
+                left = len(self.plan_steps) - len(self._plan_used)
+                print(f"      + [Kế hoạch] Bước {i + 1}/{len(self.plan_steps)} "
+                      f"[{platform}] '{q}' (còn {left} bước).")
+                return q
+        return None
+
+    def _plan_keyword(self, platform, theme_key="google_query", default=""):
+        """Từ khóa cho một action: ưu tiên bước kế tiếp của kế hoạch cụm (v1.5.2),
+        không có thì dùng session_theme (cặp từ khóa cũ) rồi đến default."""
+        q = self._next_plan_step(platform)
+        if q:
+            return q
+        theme_q = (self.session_theme or {}).get(theme_key, "")
+        return (theme_q or default or "").strip()
+
+    # ==========================================
     # CÁC HÀNH ĐỘNG NGUYÊN TỬ (ATOMIC ACTIONS)
     # ==========================================
 
@@ -103,8 +279,8 @@ class WarmupWorkflow:
         # human_click ở đây KHÔNG kích hoạt điều hướng — xem _navigate_via_google).
         print("  -> [Action] Tìm kiếm Google...")
         
-        # [CẬP NHẬT LẤY TỪ KHÓA TỪ AI THEME]
-        keyword = self.session_theme.get("google_query", "tin tức thời sự")
+        # [v1.5.2] Ưu tiên bước kế tiếp của KẾ HOẠCH CỤM, fallback cặp từ khóa cũ
+        keyword = self._plan_keyword("google", "google_query", "tin tức thời sự")
         
         try:
             page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=45000)
@@ -172,7 +348,7 @@ class WarmupWorkflow:
         
         try:
             # Cổng vào tự nhiên: gõ "chủ đề + tên báo" trên Google rồi bấm kết quả
-            landed = self._navigate_via_google(page, self.session_theme["google_query"], target_domain)
+            landed = self._navigate_via_google(page, self._plan_keyword("news", "google_query", "tin tức mới nhất"), target_domain)
             if not landed:
                 print("      + [Google] Không đáp đúng trang báo qua cổng Google — (Fallback Google) vào thẳng.")
                 page.goto(target_site, wait_until="domcontentloaded", timeout=45000)
@@ -430,8 +606,8 @@ class WarmupWorkflow:
             
             search_box = active_page.locator("textarea[name='q'], input[name='q']").first
             
-            # Lấy query từ AI theme, nếu không có thì dùng từ khóa fallback
-            query = self.session_theme.get("google_query", "thời sự hôm nay") if hasattr(self, 'session_theme') and self.session_theme else "feeling burned out"
+            # v1.5.2: ưu tiên bước kế tiếp của KẾ HOẠCH CỤM, fallback cặp từ khóa cũ
+            query = self._plan_keyword("news", "google_query", "thời sự hôm nay")
             
             print(f"      + Đang nhập từ khóa: '{query}'...")
             self.human_type(search_box, query)
@@ -833,8 +1009,8 @@ class WarmupWorkflow:
             """Hành động mới: Tìm kiếm YouTube theo chủ đề AI chọn"""
             print("  -> [Action] Tìm kiếm và xem trên YouTube...")
             
-            # [CẬP NHẬT LẤY TỪ KHÓA TỪ AI THEME]
-            keyword = self.session_theme.get("youtube_query", "tin tức mới nhất")
+            # v1.5.2: ưu tiên bước kế tiếp của KẾ HOẠCH CỤM, fallback cặp từ khóa cũ
+            keyword = self._plan_keyword("youtube", "youtube_query", "tin tức mới nhất")
             
             try:
                 page.goto("https://www.youtube.com", wait_until="domcontentloaded", timeout=45000)
@@ -1672,7 +1848,7 @@ class WarmupWorkflow:
         Chỉ mô phỏng hành vi xem và cuộn để tạo tín hiệu fingerprint."""
         print("  -> [Action] Bắt đầu phiên TikTok: Tìm qua Google + lướt video (chế độ xem, không tương tác)...")
         try:
-            keyword = self.session_theme.get("google_query", "giai tri").strip()
+            keyword = self._plan_keyword("tiktok", "google_query", "giai tri").strip()
 
             # --- CỔNG VÀO TỰ NHIÊN: Google -> gõ từ khóa -> cuộn -> bấm kết quả TikTok ---
             landed = self._navigate_via_google(page, keyword, "tiktok.com")
@@ -1870,7 +2046,7 @@ class WarmupWorkflow:
         try:
             lang = self._detect_locale_lang(page)
             base_url = f"https://{lang}.wikipedia.org"
-            keyword = self.session_theme.get("google_query", "kien thuc").strip()
+            keyword = self._plan_keyword("wikipedia", "google_query", "kien thuc").strip()
             print(f"      + Ngôn ngữ trình duyệt: '{lang}' -> đích {base_url}")
 
             # --- CỔNG VÀO TỰ NHIÊN: Google -> gõ từ khóa -> cuộn -> bấm kết quả Wikipedia ---
@@ -1921,6 +2097,238 @@ class WarmupWorkflow:
 
         except Exception as e:
             print(f"      + Lỗi khi đọc Wikipedia: {e}")
+
+    def action_search_maps(self, page):
+        """Kịch bản Google Maps (v1.5.2): tìm ĐỊA ĐIỂM liên quan tới chủ đề xuyên suốt
+        ("công viên chạy gần đây", "cửa hàng đồ chạy bộ"...) — kiểu người thật:
+        lên Google gõ chủ đề -> đáp Google Maps -> gõ lại cụm tìm trong ô của Maps ->
+        lướt danh sách -> bấm 1 place -> ngắm thông tin (xếp hạng/giờ/mô tả) ->
+        thỉnh thoảng mở tab Bài đánh giá -> zoom/pan bản đồ -> về lại danh sách.
+
+        Selector ĐÃ CHỨNG MINH trên DOM thật (locale vi, diag 3 lượt 2026-10):
+          ô tìm Maps  input[name='q'] (KHÔNG có #searchboxinput)
+          danh sách   div[role='feed'] > div.Nv2PK, a[href*='/maps/place/']
+          tiêu đề     h1.DUwDvf (h1 trần cũng khớp "Kết quả" -> ưu tiên DUwDvf)
+          xếp hạng    div.jANrlb, chi tiết div.W4Efsd, lưu button[aria-label*='Lưu']
+          tab         button[role='tab'][aria-label*='Bài đánh giá'] (CHỈ có 2 tab
+                      khi vào thẳng /maps/place/ -> không được giả định đủ 3)
+          zoom        button[aria-label*='Phóng'] / [aria-label*='Thu nhỏ'], canvas
+        KHÔNG đọc từng bài đánh giá riêng lẻ — diag chứng minh ~20 selector review
+        card đều 0 khớp (Maps render bằng canvas/virtual list)."""
+        print("  -> [Action] Tìm địa điểm trên Google Maps (qua cổng Google)...")
+        try:
+            keyword = self._plan_keyword("maps", "google_query", "địa điểm gần đây").strip()
+            print(f"      + Cụm tìm địa điểm: '{keyword}'")
+
+            # --- CỔNG GOOGLE: không goto thẳng Maps (nguyên tắc vàng §3) ---
+            # Diag: bấm kết quả Google -> Maps nhưng QUERY BỊ MẤT (landing /maps/?q),
+            # nên sau khi đáp Maps phải gõ lại cụm tìm vào ô riêng của Maps.
+            # target_domain="maps" (không phải "google.com/maps") vì href Google trả
+            # về "/goto?url=..." và breadcrumb hiển thị "maps.google" -> chuỗi "maps"
+            # khớp cả breadcrumb lẫn URL sau khi đáp.
+            self._navigate_via_google(page, keyword, "maps")
+            on_maps = False
+            try:
+                cur = (page.url or "").lower()
+                on_maps = ("google.com/maps" in cur) or ("maps.google" in cur)
+            except Exception:
+                pass
+            if not on_maps:
+                # (Fallback Google) ghi nhãn rõ ràng như các action khác
+                print("      + [Google] Không đáp Google Maps qua cổng Google — (Fallback Google) vào thẳng.")
+                try:
+                    page.goto("https://www.google.com/maps", wait_until="domcontentloaded", timeout=60000)
+                    self.random_sleep(2, 4)
+                except Exception as goto_err:
+                    print(f"      + Lỗi vào Maps (bỏ qua action): {goto_err}")
+                    return
+
+            self._close_popups(page)
+            self.move_mouse_viewport_center(page)
+
+            # --- Gõ lại cụm tìm vào ô search RIÊNG của Maps (đã chứng minh: input[name='q']) ---
+            typed = False
+            try:
+                box = page.locator("input[name='q']").first
+                box.wait_for(state="visible", timeout=8000)
+                self.human_hover(page, box)
+                self.random_sleep(0.4, 1.1)
+                self.human_type(box, keyword)
+                self.random_sleep(0.8, 1.8)
+                page.keyboard.press("Enter")
+                typed = True
+                print("      + Đã gõ cụm tìm vào ô search của Maps — chờ danh sách kết quả...")
+            except Exception as type_err:
+                print(f"      + Không gõ được vào ô search Maps ({type_err}) — dùng nguyên trang đang mở.")
+
+            # Chờ danh sách kết quả render (Maps tải async)
+            try:
+                page.locator("div[role='feed'] a[href*='/maps/place/'], div.Nv2PK").first.wait_for(
+                    state="visible", timeout=12000)
+            except Exception:
+                print("      + Danh sách địa điểm không lên — ngắm trang hiện tại rồi thoát action.")
+
+            self.random_sleep(1.5, 3.5)
+
+            # --- Lướt danh sách kết quả kiểu người thật (scroll mượt + dừng ngắm) ---
+            for _ in range(random.randint(2, 4)):
+                try:
+                    self._human_scroll(page, random.randint(160, 380))
+                    self.random_sleep(1.2, 3.0)
+                except Exception:
+                    break
+            if random.random() < 0.4:
+                try:
+                    self._human_scroll(page, -random.randint(120, 260))
+                    self.random_sleep(1.0, 2.2)
+                except Exception:
+                    pass
+
+            # --- Bấm 1 địa điểm trong tầm nhìn ---
+            opened_place = False
+            try:
+                items = page.locator("div.Nv2PK, a[href*='/maps/place/']").all()
+                live = []
+                for it in items:
+                    try:
+                        box = self._safe_bbox(it, timeout=800)
+                        if box and box["height"] > 40 and -100 <= box["y"] <= 900:
+                            live.append(it)
+                    except Exception:
+                        continue
+                if live:
+                    target = random.choice(live[:8])
+                    name = ""
+                    try:
+                        name = (target.get_attribute("aria-label") or target.inner_text(timeout=1500) or "").strip()
+                    except Exception:
+                        pass
+                    print(f"      + Chọn địa điểm: '{(name.splitlines() or ['?'])[0][:60]}'")
+                    self.move_mouse_bezier(page, target)
+                    self.random_sleep(0.5, 1.6)
+                    try:
+                        target.click(timeout=8000)
+                    except Exception:
+                        pass  # click chờ trang tải -> hay timeout; URL poll bên dưới mới quyết định
+                    opened_place = True
+                    self.random_sleep(2.0, 4.5)
+                else:
+                    print("      + [Bỏ qua] Không có thẻ địa điểm nào đang hiển thị để bấm.")
+            except Exception as click_err:
+                print(f"      + Bỏ qua bước bấm địa điểm: {click_err}")
+
+            # --- Ngắm panel thông tin địa điểm (CHỈ selector đã chứng minh) ---
+            if opened_place:
+                try:
+                    title = page.locator("h1.DUwDvf").first
+                    if title.is_visible(timeout=1000):
+                        print(f"      + Đang xem trang: '{(title.inner_text(timeout=1500) or '').strip()[:60]}'")
+                except Exception:
+                    pass
+
+                nap = time.time() + random.uniform(8, 18)
+                while time.time() < nap and not self.stop_requested:
+                    time.sleep(0.5)
+
+                # Xếp hạng / số bài đánh giá (aggregate) + vài dòng chi tiết
+                try:
+                    rate = page.locator("div.jANrlb").first
+                    if rate.is_visible(timeout=1000):
+                        txt = " ".join((rate.inner_text(timeout=1500) or "").split())[:60]
+                        print(f"      + Xếp hạng: {txt}")
+                        self.human_hover(page, rate)
+                        self.random_sleep(1.0, 2.6)
+                except Exception:
+                    pass
+                try:
+                    details = page.locator("div.W4Efsd").all()
+                    for d in details[: random.randint(2, 4)]:
+                        try:
+                            if d.is_visible(timeout=500):
+                                self.human_hover(page, d)
+                                self.random_sleep(0.6, 1.8)
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+
+                # 45% mở tab "Bài đánh giá" (chỉ NGẮM tổng, không đọc từng review)
+                if random.random() < 0.45:
+                    try:
+                        tab = page.locator("button[role='tab'][aria-label*='đánh giá']").first
+                        if not tab.is_visible(timeout=800):
+                            tab = page.locator("button[role='tab']:has-text('đánh giá')").first
+                        if tab.is_visible(timeout=800):
+                            self.move_mouse_bezier(page, tab)
+                            self.random_sleep(0.4, 1.2)
+                            tab.click(timeout=6000)
+                            print("      + Mở tab Bài đánh giá (ngắm xếp hạng tổng)...")
+                            self.random_sleep(2.0, 5.0)
+                            for _ in range(random.randint(1, 3)):
+                                self._human_scroll(page, random.randint(120, 300))
+                                self.random_sleep(1.0, 2.4)
+                    except Exception as tab_err:
+                        print(f"      + Bỏ qua tab đánh giá: {tab_err}")
+
+                # Thỉnh thoảng bấm "Lưu" rồi thôi (tín hiệu tương tác thật) — 25%
+                if random.random() < 0.25:
+                    try:
+                        save = page.locator("button[aria-label*='Lưu']").first
+                        if save.is_visible(timeout=800):
+                            self.move_mouse_bezier(page, save)
+                            self.random_sleep(0.5, 1.4)
+                            save.click(timeout=5000)
+                            print("      + Bấm Lưu địa điểm (mở list chọn)...")
+                            self.random_sleep(1.5, 3.5)
+                            page.keyboard.press("Escape")
+                            self.random_sleep(0.6, 1.4)
+                    except Exception:
+                        pass
+
+            # --- Zoom / pan bản đồ kiểu người thật ---
+            try:
+                for _ in range(random.randint(1, 3)):
+                    if random.random() < 0.6:
+                        btn = page.locator("button[aria-label*='Phóng']").first
+                        act = "phóng to"
+                    else:
+                        btn = page.locator("button[aria-label*='Thu nhỏ']").first
+                        act = "thu nhỏ"
+                    if btn.is_visible(timeout=800):
+                        self.human_hover(page, btn)
+                        self.random_sleep(0.4, 1.2)
+                        btn.click(timeout=4000)
+                        print(f"      + {act} bản đồ...")
+                        self.random_sleep(1.2, 3.0)
+            except Exception:
+                pass
+            try:
+                canvas = page.locator("canvas").first
+                cb = self._safe_bbox(canvas, timeout=1000)
+                if cb and cb["width"] > 200:
+                    cx = cb["x"] + cb["width"] * random.uniform(0.35, 0.65)
+                    cy = cb["y"] + cb["height"] * random.uniform(0.35, 0.65)
+                    page.mouse.move(cx, cy)
+                    self.random_sleep(0.4, 1.0)
+                    page.mouse.wheel(random.randint(-260, 260), random.randint(-180, 180))
+                    print("      + Kéo nhẹ bản đồ xem khu vực xung quanh...")
+                    self.random_sleep(1.5, 3.5)
+            except Exception:
+                pass
+
+            # --- Quay lại danh sách / trang trước (đi tiếp hành trình chủ đề) ---
+            if opened_place and random.random() < 0.6:
+                try:
+                    page.go_back(wait_until="domcontentloaded", timeout=30000)
+                    print("      + Quay lại danh sách địa điểm...")
+                    self.random_sleep(1.5, 3.5)
+                except Exception:
+                    pass
+
+            print("  -> [Action] HOÀN TẤT PHIÊN GOOGLE MAPS!")
+
+        except Exception as e:
+            print(f"      + Lỗi khi tìm địa điểm trên Maps: {e}")
 
     # ==========================================
     # PHA 2/3 - QUẢN LÝ GOOGLE ALERTS (google.com/alerts)
@@ -2224,21 +2632,50 @@ class WarmupWorkflow:
         
         print(f"[*] Bắt đầu phiên làm việc ngẫu nhiên với {total_actions} hành động.")
 
-        # --- AI Brain: Sinh biến thể từ khóa xoay quanh chủ đề của cặp được chọn ---
+        # --- v1.5.2: KẾ HOẠCH CỤM — 1 chủ đề xuyên suốt, AI sinh chuỗi bước nối nhau ---
+        # Cặp từ khóa "Google | YouTube" không còn là trục điều khiển phiên: nó chỉ còn
+        # là HẠT GIỐNG chủ đề (seed). Mọi action lấy từ khóa từ bước kế tiếp của kế hoạch.
+        seed_topic = ((self.session_theme or {}).get("google_query") or "").strip()
+        plan = None
         if self.brain:
+            plan = self._safe_ask_plan(topic_hint=seed_topic)
+        if plan:
+            self.plan_steps = plan
+            # Seed vẫn được AI viết lại 1 lần cho gọn (alerts + fallback dùng sau này)
+            ai_keyword = self._safe_ask_keyword(topic_hint=seed_topic)
+            if ai_keyword:
+                self.session_theme["google_query"] = ai_keyword
+            print(f"      [Kế hoạch] {len(self.plan_steps)} bước nối nhau quanh chủ đề "
+                  f"'{self.session_theme.get('google_query', seed_topic)}' — không chạy theo cặp.")
+        elif self.brain:
+            # AI có thật nhưng kế hoạch lỗi -> giữ behaviour cũ (2 lượt hỏi từ khóa)
             theme = self.session_theme or {}
-            # Google: mọi phase đều dùng google_query (search/tin tức/alerts/cổng Google)
             ai_keyword = self._safe_ask_keyword(topic_hint=theme.get("google_query", ""))
             if ai_keyword:
                 self.session_theme["google_query"] = ai_keyword
-            # YouTube: chỉ sinh khi phiên này THỰC SỰ xem YouTube (phase clean/youtube + không tick bỏ qua)
-            # -> tránh tốn 1 lượt gọi AI vô ích ở phase mail hoặc khi bỏ qua YouTube
             if self.phase != "mail" and not getattr(self, "skip_youtube", False):
                 ai_youtube = self._safe_ask_keyword(
                     topic_hint=theme.get("youtube_query", ""), platform_label="YouTube"
                 )
                 if ai_youtube:
                     self.session_theme["youtube_query"] = ai_youtube
+        else:
+            # Không có AI Brain (CLI mặc định): vẫn dùng bộ bước dự phòng theo chủ đề seed
+            self.plan_steps = self._local_plan_steps(seed_topic)
+            print(f"      [Kế hoạch] Không có AI Brain — dùng bộ bước dự phòng "
+                  f"{len(self.plan_steps)} bước quanh chủ đề '{seed_topic}'.")
+
+        # --- v1.5.2: TRẦN THỜI GIAN PHIÊN (15-30 phút, mỗi phiên một mốc khác nhau) ---
+        if self.session_deadline_s and self.session_deadline_s > 0:
+            deadline_s = float(self.session_deadline_s)
+            src_deadline = "caller"
+        else:
+            deadline_s = random.uniform(15, 30) * 60
+            self.session_deadline_s = deadline_s
+            src_deadline = "ngẫu nhiên"
+        session_t0 = time.time()
+        print(f"      [Giới hạn] Phiên này chạy tối đa {_fmt_session_dur(deadline_s)} "
+              f"({src_deadline}) — quá mốc thì kết thúc phiên, không ngồi cả buổi.")
 
         # === Bản đồ hành động theo GIAI ĐOẠN NGÂM (phase) ===
         if self.phase == "youtube":
@@ -2249,6 +2686,8 @@ class WarmupWorkflow:
                 "action_read_news": (self.action_read_news, 0.20),
                 "action_read_wikipedia": (self.action_read_wikipedia, 0.20),
                 "action_manage_google_alerts": (self.action_manage_google_alerts, 0.15),
+                # v1.5.2: Maps vẫn hợp ở pha 3 (tìm địa điểm theo cụm chủ đề)
+                "action_search_maps": (self.action_search_maps, 0.20),
             }
             if getattr(self, 'skip_youtube', False):
                 action_map.pop("watch_video", None)
@@ -2261,10 +2700,13 @@ class WarmupWorkflow:
                 "search_google": (self.action_search_and_read_news, 0.25),
                 "action_read_wikipedia": (self.action_read_wikipedia, 0.30),
                 "action_manage_google_alerts": (self.action_manage_google_alerts, 0.35),
-                "action_watch_tiktok": (self.action_watch_tiktok, 0.20),
+                # v1.5.2: TikTok hạ trọng số (0.20 -> 0.12) — acc không bị "vào TikTok liên tục"
+                "action_watch_tiktok": (self.action_watch_tiktok, 0.12),
                 "action_interact_reddit": (self.action_interact_reddit, 0.20),
                 "action_search_weather": (self.action_search_weather, 0.1),
                 "action_google_finance": (self.action_google_finance, 0.1),
+                # v1.5.2: tìm địa điểm gần nhà trên Google Maps (cụm "công viên chạy gần nhà")
+                "action_search_maps": (self.action_search_maps, 0.25),
             }
         else:
             # Pha 1 "clean": trắng, chưa mail — không đụng Google Alerts.
@@ -2275,8 +2717,11 @@ class WarmupWorkflow:
                 "search_google": (self.action_search_and_read_news, 0.25),
                 "action_search_weather": (self.action_search_weather, 0.1),
                 "action_google_finance": (self.action_google_finance, 0.1),
-                "action_watch_tiktok": (self.action_watch_tiktok, 0.45),
+                # v1.5.2: TikTok 0.45 -> 0.15 — trước đây trọng số cao NHẤT pha 1 nên phiên
+                # toàn quay lại TikTok; giờ chủ đề theo kế hoạch, TikTok chỉ là gia vị.
+                "action_watch_tiktok": (self.action_watch_tiktok, 0.15),
                 "action_read_wikipedia": (self.action_read_wikipedia, 0.35),
+                "action_search_maps": (self.action_search_maps, 0.30),
             }
             # Chỉ bổ sung kịch bản YouTube nếu người dùng KHÔNG tick ô "Bỏ qua"
             if getattr(self, 'skip_youtube', False) == False:
@@ -2293,16 +2738,33 @@ class WarmupWorkflow:
             action_map.pop("action_google_finance", None)
             print("      [!] Chế độ BỎ QUA TỪ KHÓA NGẪU NHIÊN đang bật. Sẽ không tra thời tiết/tài chính ngẫu nhiên.")
         
-        last_action_name = None 
+        last_action_name = None
+        # v1.5.2: đếm số lần vào TikTok trong phiên để chặn "vào liên tục"
+        tiktok_runs = 0
+        tiktok_cap = max(1, int(round(total_actions / 3))) if total_actions else 1
 
         for i in range(total_actions):
             if self.stop_requested:
                 print(f"\n[!] [Stop] Người dùng yêu cầu dừng - kết thúc phiên sau {i} hành động.")
                 break
-            print(f"\n[*] Hành động thứ {i+1}/{total_actions}:")
+            # v1.5.2: trần thời gian phiên — quá mốc thì DỪNG, không ngồi cả buổi
+            elapsed = time.time() - session_t0
+            if elapsed >= deadline_s:
+                print(f"\n[!] [Giới hạn] Phiên đã chạy {_fmt_session_dur(elapsed)} "
+                      f"(tối đa {_fmt_session_dur(deadline_s)}) — kết thúc phiên sau {i} hành động.")
+                break
+            print(f"\n[*] Hành động thứ {i+1}/{total_actions} "
+                  f"(đã chạy {_fmt_session_dur(elapsed)}/{_fmt_session_dur(deadline_s)}):")
             
             # 1. Lọc bỏ hành động vừa chạy ở lượt trước
             valid_actions = {name: data for name, data in action_map.items() if name != last_action_name}
+
+            # v1.5.2: chặn vào TikTok lặp lại trong cùng một phiên (cap theo số hành động)
+            if tiktok_runs >= tiktok_cap:
+                valid_actions.pop("action_watch_tiktok", None)
+                if last_action_name == "action_watch_tiktok" and not valid_actions:
+                    valid_actions = {k: v for k, v in action_map.items()
+                                     if k != "action_watch_tiktok"} or action_map
             
             # (Fallback an toàn: Nếu anh chỉ bật đúng 1 hành động duy nhất trong action_map thì bỏ qua bộ lọc)
             if not valid_actions:
@@ -2317,6 +2779,11 @@ class WarmupWorkflow:
             
             # 3. Ghi nhớ hành động này để chặn ở vòng lặp sau
             last_action_name = chosen_action_name
+            if chosen_action_name == "action_watch_tiktok":
+                tiktok_runs += 1
+                if tiktok_runs >= tiktok_cap:
+                    print(f"      [!] Đỉnh {tiktok_runs} lượt TikTok trong phiên — "
+                          f"không vào TikTok nữa (chống lặp lại liên tục).")
             
             # 4. Thực thi (v1.2.6: bấm giờ + ghi lỗi để đổ vào cột status/duration_s/error)
             _t0 = time.time()
@@ -2333,10 +2800,14 @@ class WarmupWorkflow:
                     self._log_activity(page, chosen_action_name, status=_status,
                                        duration_s=round(time.time() - _t0, 1), error=_err)
             
-            # Nghỉ giữa 2 hành động, nhưng responsive với Stop
+            # Nghỉ giữa 2 hành động, nhưng responsive với Stop + trần thời gian phiên
             sleep_end = time.time() + random.uniform(5, 10)
             while time.time() < sleep_end and not self.stop_requested:
                 time.sleep(0.5)
+                if time.time() - session_t0 >= deadline_s:
+                    print(f"\n[!] [Giới hạn] Đã chạm mốc {_fmt_session_dur(deadline_s)} "
+                          f"ngay giữa nhịp nghỉ — kết thúc phiên.")
+                    break
 
         print("[+] Kết thúc phiên làm việc ngẫu nhiên.")
         page.close()
@@ -2440,6 +2911,7 @@ class WarmupWorkflow:
         "action_manage_google_alerts": "GoogleAlerts",
         "action_search_weather": "Google",
         "action_google_finance": "Google",
+        "action_search_maps": "GoogleMaps",  # v1.5.2: URL maps.google.com dễ suy thành "Google"
     }
 
     def _derive_platform(self, url):

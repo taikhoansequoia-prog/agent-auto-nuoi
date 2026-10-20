@@ -74,18 +74,23 @@ PHASE_DETAILS = {
         "actions": [
             ("Tìm kiếm YouTube", 0.60, "Gõ từ khóa YouTube vào ô tìm kiếm (gõ như người thật), lướt kết quả 6-12s, bấm 1 trong 4 video đầu, xem chuỗi 2-3 video.", "yt"),
             ("Xem trang chủ YouTube", 0.40, "Vào youtube.com, lướt feed, hover thumbnail, chốt 1 video xem 55-90% thời lượng. Trang chủ trống (acc mới) -> tự chuyển sang tìm kiếm.", "yt"),
-            ("Xem TikTok", 0.45, "Vào TikTok QUA CỔNG GOOGLE, xem thuần 3-7 video, mỗi cái ngồi 12-35s, không like/comment.", None),
+            ("Google Maps", 0.30, "Vào Maps QUA CỔNG GOOGLE, gõ 1 địa điểm theo chủ đề (công viên gần nhà, quán ăn...), lướt danh sách, bấm 1 nơi đọc thông tin, 45% xem tab đánh giá, kéo/zoom bản đồ.", None),
+            ("Xem TikTok", 0.15, "Vào TikTok QUA CỔNG GOOGLE, xem thuần 3-7 video, không like/comment. v1.5.2: trọng số giảm mạnh + CAP số lượt trong phiên (không còn vào liên tục).", None),
             ("Đọc Wikipedia", 0.35, "Vào Wikipedia qua Google theo ngôn ngữ máy (vi/en...), cuộn đọc 60-120s, 40% bấm thêm 1 link nội bộ rồi đọc tiếp.", None),
             ("Đọc báo", 0.35, "Lên Google gõ 'chủ đề + tên báo' rồi bấm kết quả (1 trong 13 trang báo VN + quốc tế), lướt trang chủ 30-60s rồi bấm 1-2 bài đọc 60-180s.", None),
             ("Google: tìm + đọc tin", 0.25, "Tìm chủ đề tin tức trên Google, bấm tab 'Tin tức', đọc 1-3 bài (cuộn nghỉ 8-16s mỗi nhịp).", None),
-            ("Thời tiết ngẫu nhiên", 0.10, "Hỏi Google thời tiết bằng từ khóa cố định ngoài chủ đề cặp, xem thẻ dự báo chi tiết.", "rand"),
+            ("Thời tiết ngẫu nhiên", 0.10, "Hỏi Google thời tiết bằng từ khóa cố định ngoài chủ đề phiên, xem thẻ dự báo chi tiết.", "rand"),
             ("Google Finance", 0.10, "Xem google.com/finance, tra 1 mã ngẫu nhiên (BTC-USD, AAPL, TSLA...), ngắm biểu đồ + đọc 1 bài tài chính.", "rand"),
         ],
-        "notes": ("Không có Google Alerts trong lịch trình. Không bao giờ Subscribe (kể cả xem video >70%). "
+        "notes": ("KHÔNG có Google Alerts trong lịch trình. Không bao giờ Subscribe (kể cả xem video >70%). "
                   "KHÔNG có Reddit ở pha này (acc trắng chưa nên dạo nền tảng 'nặng') — Reddit chỉ xuất hiện từ Pha 2. "
                   "Đọc báo đi QUA CỔNG GOOGLE (gõ tìm kiếm rồi bấm kết quả), không goto thẳng. "
-                  "AI Brain (nếu bật) sinh biến thể từ khóa cho CẢ Google lẫn YouTube — tối đa 2 lượt hỏi/phiên. "
-                  "Tick 'Bỏ qua xem YouTube' -> còn 6 hành động thuần lướt web."),
+                  "v1.5.2: AI Brain (nếu bật) chọn MỘT chủ đề xuyên suốt rồi sinh kế hoạch 8-14 bước nối nhau "
+                  "(search cách tập chạy -> xem video hướng dẫn -> tìm giày -> tìm công viên gần nhà trên Maps); "
+                  "từ khóa trong danh sách 'CẶP TỪ KHÓA' chỉ còn là HẠT GIỐNG chủ đề, không điều khiển phiên theo cặp nữa. "
+                  "Mỗi phiên có TRẦN THỜI GIAN 15-30 phút (bot tự chọn, quá mốc là kết thúc) — không ngồi cả buổi. "
+                  "TikTok bị hạ trọng số + cap số lượt trong một phiên. "
+                  "Tick 'Bỏ qua xem YouTube' -> còn 7 hành động thuần lướt web."),
     },
     "mail": {
         "goal": ("Giai đoạn 2 — tài khoản đã lắp Gmail. Trọng tâm là HỆ SINH THÁI GOOGLE: nuôi "
@@ -94,15 +99,18 @@ PHASE_DETAILS = {
         "actions": [
             ("Đọc báo", 0.35, "Lên Google gõ 'chủ đề + tên báo' rồi bấm kết quả (1 trong 13 trang báo), lướt trang chủ rồi bấm 1-2 bài đọc 60-180s.", None),
             ("Google Alerts", 0.35, "Vào google.com/alerts: NHÁNH A tạo alert mới cho từ khóa phiên (gate DB: từ khóa chưa trùng + tối đa 1 alert mới/7 ngày/profile) hoặc NHÁNH B chăm alert cũ (hover, xem preview, mở edit rồi đóng — không sửa/xóa).", None),
+            ("Google Maps", 0.25, "Vào Maps qua cổng Google, tìm 1 địa điểm theo chủ đề, bấm đọc thông tin nơi đó, xem tab đánh giá.", None),
             ("Đọc Wikipedia", 0.30, "Vào Wikipedia qua Google theo ngôn ngữ máy, cuộn đọc 60-120s.", None),
             ("Google: tìm + đọc tin", 0.25, "Tìm chủ đề tin tức trên Google, bấm tab 'Tin tức', đọc 1-3 bài.", None),
-            ("Xem TikTok", 0.20, "Vào TikTok qua cổng Google, xem thuần 3-7 video.", None),
+            ("Xem TikTok", 0.12, "Vào TikTok qua cổng Google, xem thuần 3-7 video. v1.5.2: trọng số giảm + cap lượt/phiên.", None),
             ("Reddit", 0.20, "Lướt feed reddit.com, mở 2-4 bài, upvote bài + comment.", None),
-            ("Thời tiết ngẫu nhiên", 0.10, "Hỏi Google thời tiết (từ khóa ngoài chủ đề cặp).", "rand"),
+            ("Thời tiết ngẫu nhiên", 0.10, "Hỏi Google thời tiết (từ khóa ngoài chủ đề phiên).", "rand"),
             ("Google Finance", 0.10, "Xem google.com/finance, tra 1 mã ngẫu nhiên.", "rand"),
         ],
         "notes": ("Chưa login Google trên trình duyệt -> action Alerts tự bỏ qua (log 'Chưa login Google'). "
-                  "AI Brain chỉ hỏi 1 lượt từ khóa Google (không hỏi YouTube vì pha này không xem YouTube). "
+                  "v1.5.2: AI Brain sinh KẾ HOẠCH 8-14 bước nối nhau quanh MỘT chủ đề xuyên suốt (danh sách "
+                  "'CẶP TỪ KHÓA' chỉ là hạt giống); không còn hỏi 2 lượt theo cặp Google/YouTube. "
+                  "Trần thời gian mỗi phiên 15-30 phút (bot tự chọn). TikTok giảm trọng số + cap lượt/phiên. "
                   "Không đăng ký kênh ở pha này. Menu tần suất alert chọn theo tỉ lệ 20% ngay lập tức / 50% mỗi ngày / 30% mỗi tuần."),
     },
     "youtube": {
@@ -114,11 +122,14 @@ PHASE_DETAILS = {
             ("Xem trang chủ YouTube", 0.40, "Lướt feed trang chủ, hover preview thumbnail, chốt video xem 55-90% thời lượng. Trang chủ trống -> tự chuyển sang tìm kiếm.", "yt"),
             ("Đọc báo", 0.20, "Điểm xuyết: lên Google gõ 'chủ đề + tên báo' rồi bấm kết quả, bấm 1-2 bài.", None),
             ("Đọc Wikipedia", 0.20, "Điểm xuyết đọc Wikipedia qua cổng Google.", None),
+            ("Google Maps", 0.20, "Tìm địa điểm theo chủ đề trên Google Maps (qua cổng Google), bấm đọc thông tin + xem đánh giá.", None),
             ("Google Alerts (chăm thôi)", 0.15, "Mở google.com/alerts xem/hover/preview alert đã có — code CHẶN tạo mới khi phase = youtube.", None),
         ],
         "notes": ("Subscribe chỉ bật khi ĐỦ cả 3: xem >70% thời lượng video + chế độ này (needs_sub) + quota ngày còn "
                   "(DB gate 1 sub/ngày/profile, ghi log_sub_success). 40% Like khi xem video. Tick 'Bỏ qua xem YouTube' "
-                  "ở pha này = mất trục chính, chỉ còn 3 hành động lướt web. AI Brain sinh biến thể từ khóa Google + YouTube."),
+                  "ở pha này = mất trục chính, chỉ còn 4 hành động lướt web. v1.5.2: AI Brain sinh kế hoạch 8-14 bước "
+                  "nối nhau quanh MỘT chủ đề xuyên suốt (Maps/YouTube/Wikipedia lấy từ khóa theo từng bước, không theo cặp). "
+                  "Trần thời gian mỗi phiên 15-30 phút."),
     },
 }
 
@@ -355,7 +366,14 @@ def run_single_profile(api, profile_id, profile_name, themes, slot_index, screen
                 phase=phase,
                 should_stop=STOP_EVENT.is_set
             )
-            
+            # v1.5.2: TRẦN THỜI GIAN PHIÊN. Nếu người dùng GHIM "Mục tiêu vòng" (>0) thì mốc đó
+            # vừa là mục tiêu ⏰ vừa là giới hạn cứng; để 0 -> warmup tự random 15-30 phút/phiên.
+            warmup.session_deadline_s = int(fixed_target_s) if fixed_target_s and fixed_target_s > 0 else 0
+            if fixed_target_s and fixed_target_s > 0:
+                print(f"[{profile_name}] ⏳ Trần phiên: {_fmt_dur(int(fixed_target_s))} (theo mục tiêu đã ghim)")
+            else:
+                print(f"[{profile_name}] ⏳ Trần phiên: bot tự chọn 15-30 phút (không ngồi cả buổi)")
+
             total_actions = random.randint(4, 8)
             _cyc["actions"] = total_actions  # v1.4.0: ghi vào row chu trình
             # v1.4.1: MỤC TIÊU NGẪU NHIÊN cho RIÊNG vòng này — bot tự quyết, không ngày nào
@@ -930,21 +948,21 @@ class AutomationApp:
                                     command=self.show_stage_board, style="Tool.TButton")
         self.btn_stage.grid(row=9, column=0, columnspan=3, sticky="we", pady=(6, 0))
 
-        # ---------- Thẻ ngang dưới: cặp từ khóa Google ↔ YouTube (hành vi 1.4 giữ nguyên) ----------
-        card_kw = ttk.Labelframe(outer, text="  CẶP TỪ KHÓA — GOOGLE ↔ YOUTUBE  ", padding=(12, 8))
+        # ---------- Thẻ ngang dưới: hạt giống chủ đề (v1.5.2: không còn là cặp điều khiển phiên) ----------
+        card_kw = ttk.Labelframe(outer, text="  CHỦ ĐỀ XUYÊN SUỐT — HẠT GIỐNG CHO AI BRAIN  ", padding=(12, 8))
         card_kw.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(0, 6))
         kw_head = ttk.Frame(card_kw)
         kw_head.pack(fill="x")
-        ttk.Label(kw_head, text="Mỗi dòng 1 chủ đề · YouTube trống sẽ dùng lại Google",
+        ttk.Label(kw_head, text="Mỗi dòng 1 chủ đề · AI sinh kế hoạch 8-14 bước nối nhau · phiên 15-30 phút",
                   style="Muted.TLabel").pack(side="left")
-        ttk.Button(kw_head, text="+ Thêm cặp", command=lambda: self._add_kw_row("", "", focus=True),
-                   style="Tool.TButton", width=11).pack(side="right")
+        ttk.Button(kw_head, text="+ Thêm chủ đề", command=lambda: self._add_kw_row("", "", focus=True),
+                   style="Tool.TButton", width=14).pack(side="right")
         # Header cột canh gần đúng 2 Entry (mỗi Entry expand đều, chừa chỗ nút X ~26px)
         kw_cols = ttk.Frame(card_kw)
         kw_cols.pack(fill="x", pady=(6, 1))
-        ttk.Label(kw_cols, text="GOOGLE", foreground=self.C_ACCENT,
+        ttk.Label(kw_cols, text="CHỦ ĐỀ (GOOGLE)", foreground=self.C_ACCENT,
                   font=("Segoe UI", 8, "bold")).pack(side="left", fill="x", expand=True, padx=(1, 3))
-        ttk.Label(kw_cols, text="YOUTUBE", foreground=self.C_ACCENT_2,
+        ttk.Label(kw_cols, text="TỪ KHÓA (YOUTUBE)", foreground=self.C_ACCENT_2,
                   font=("Segoe UI", 8, "bold")).pack(side="left", fill="x", expand=True, padx=(3, 30))
         kw_box = ttk.Frame(card_kw)
         kw_box.pack(fill="both", expand=True, pady=(2, 2))
