@@ -166,23 +166,29 @@ check("TikTok total_duration_s = 42", abs((tk_row.get("total_duration_s") or 0) 
       str(tk_row.get("total_duration_s")))
 
 # =====================================================================
-hr("2. GUI — tab board tồn tại, nằm CUỐI notebook, đủ 14 cột")
+hr("2. GUI — tab board + tab giai đoạn tồn tại, đủ 15 cột (v1.5.0 +Giai đoạn)")
 import ui_main as ui  # noqa: E402
 
 app = ui.AutomationApp(root := tk.Tk())
 root.update()
 check("AutomationApp khởi tạo OK", hasattr(app, "board_frame") and hasattr(app, "board_tree"))
 tabs = list(app.notebook.tabs())
-check("notebook có >= 2 tab (MAIN + board)", len(tabs) >= 2, str(len(tabs)))
-check("tab CUỐI là board", "THỜI LƯỢNG" in app.notebook.tab(tabs[-1], "text"),
+# v1.5.0: thứ tự chủ đích = MAIN -> (slots) -> THỜI LƯỢNG CHẠY -> GIAI ĐOẠN NGÂM.
+# Tab giai đoạn NỐI SAU bảng thời lượng, nên board giờ là tab Á CUỐI.
+check("notebook có >= 3 tab (MAIN + board + stage)", len(tabs) >= 3, str(len(tabs)))
+check("tab CUỐI là giai đoạn", "GIAI ĐOẠN" in app.notebook.tab(tabs[-1], "text"),
       repr(app.notebook.tab(tabs[-1], "text")))
+check("tab Á CUỐI là board thời lượng", "THỜI LƯỢNG" in app.notebook.tab(tabs[-2], "text"),
+      repr(app.notebook.tab(tabs[-2], "text")))
 check("board là con trực tiếp của notebook", app.board_frame in app.notebook.winfo_children())
-check("board_frame == tab cuối", str(app.board_frame) in tabs[-1] or
-      app.notebook.tab(tabs[-1], "text").strip(" ") == "THỜI LƯỢNG CHẠY",
+check("stage là con trực tiếp của notebook", app.stage_frame in app.notebook.winfo_children())
+check("board_frame == tab áp chót", str(app.board_frame) in tabs[-2],
+      repr(app.notebook.tab(tabs[-2], "text")))
+check("stage_frame == tab cuối", str(app.stage_frame) in tabs[-1],
       repr(app.notebook.tab(tabs[-1], "text")))
 tree = app.board_tree
 cols = list(tree.cget("columns"))
-check("board có đúng 14 cột", len(cols) == 14 == len(app.BOARD_COLUMNS), str(cols))
+check("board có đúng 15 cột", len(cols) == 15 == len(app.BOARD_COLUMNS), str(cols))
 check("cột khớp BOARD_COLUMNS", tuple(cols) == app.BOARD_COLUMNS, str(cols))
 check("mọi cột có heading riêng", all(str(tree.heading(c, "text")).strip() for c in cols))
 check("board KHÔNG đăng ký vào log_boxes", "THỜI LƯỢNG CHẠY" not in app.log_boxes,
@@ -361,15 +367,23 @@ root.update()
 check("tạo lại tab giữ cửa sổ đã chọn ('7')", app.var_board_days.get() == "7",
       app.var_board_days.get())
 check("frame board cũ đã bị destroy", not old_frame.winfo_exists())
-check("tab board vẫn là tab CUỐI notebook",
-      "THỜI LƯỢNG" in app.notebook.tab(app.notebook.tabs()[-1], "text"))
+# v1.5.0: _create_board_tab() luôn add() ở cuối -> board tạm thời là tab CUỐI; tab giai
+# đoạn được nối lại SAU board (giống start_automation) để khôi phục thứ tự chủ đích.
+app._create_stage_tab()
+root.update()
+check("thứ tự khôi phục: board áp chót, giai đoạn cuối",
+      "THỜI LƯỢNG" in app.notebook.tab(app.notebook.tabs()[-2], "text") and
+      "GIAI ĐOẠN" in app.notebook.tab(app.notebook.tabs()[-1], "text"),
+      str([app.notebook.tab(t, "text").strip() for t in app.notebook.tabs()]))
 check("board mới hiển thị lại dữ liệu", len(app.board_tree.get_children()) == 4,
       str(len(app.board_tree.get_children())))
 check("notebook không nhân đôi tab board",
       sum(1 for t in app.notebook.tabs() if "THỜI LƯỢNG" in app.notebook.tab(t, "text")) == 1)
+check("notebook không nhân đôi tab giai đoạn",
+      sum(1 for t in app.notebook.tabs() if "GIAI ĐOẠN" in app.notebook.tab(t, "text")) == 1)
 
 # =====================================================================
-hr("7. Bất biến chỉ số tab khi Start (quên tabs[1:] rồi tạo slot + board lại)")
+hr("7. Bất biến chỉ số tab khi Start (quên tabs[1:] rồi tạo slot + board + stage lại)")
 app._create_tab("Slot 1")
 app._create_tab("Slot 2")
 for t in list(app.notebook.tabs())[1:]:
@@ -377,19 +391,20 @@ for t in list(app.notebook.tabs())[1:]:
 for i in range(2):
     app._create_tab(f"Slot {i + 1}")
 app._create_board_tab()
+app._create_stage_tab()   # v1.5.0: start_automation cũng nối lại tab giai đoạn
 root.update()
 tabs = list(app.notebook.tabs())
 texts = [app.notebook.tab(t, "text").strip() for t in tabs]
-check("thứ tự tab = MAIN, Slot 1, Slot 2, board",
-      texts == ["MAIN", "Slot 1", "Slot 2", "THỜI LƯỢNG CHẠY"], str(texts))
+check("thứ tự tab = MAIN, Slot 1, Slot 2, board, giai đoạn",
+      texts == ["MAIN", "Slot 1", "Slot 2", "THỜI LƯỢNG CHẠY", "GIAI ĐOẠN NGÂM"], str(texts))
 app.update_tab_name(0, "Profile ngâm A")
 app.update_tab_name(1, "Profile ngâm B")
 root.update()
 root.update()
 texts = [app.notebook.tab(t, "text").strip() for t in app.notebook.tabs()]
-check("tabs()[slot+1] vẫn đúng sau khi board được nối lại",
+check("tabs()[slot+1] vẫn đúng sau khi board + stage được nối lại",
       texts[1] == "Profile ngâm A" and texts[2] == "Profile ngâm B", str(texts))
-check("board vẫn CUỐI cùng sau update_tab_name", "THỜI LƯỢNG" in texts[-1], str(texts))
+check("giai đoạn vẫn CUỐI cùng sau update_tab_name", "GIAI ĐOẠN" in texts[-1], str(texts))
 
 # =====================================================================
 hr("8. Kiểm tĩnh source (wire + chống regression)")
@@ -415,13 +430,38 @@ check("get_cycle_lifetime_stats là SELECT-only",
       "INSERT" not in src_db[src_db.index("def get_cycle_lifetime_stats"):
                             src_db.index("def get_last_cycle_targets")])
 src_wu = io.open(os.path.join(HERE, "workflow", "warmup.py"), encoding="utf-8").read()
-check("warmup.py KHÔNG bị đụng (không symbol board nao)",
+check("warmup.py KHÔNG bị đụng (không symbol board/giai đoạn nao)",
       not any(k in src_wu for k in ("_create_board_tab", "board_tree", "BOARD_COLUMNS",
-                                    "get_cycle_lifetime_stats", "board_frame")),
+                                    "get_cycle_lifetime_stats", "board_frame",
+                                    "_create_stage_tab", "stage_tree", "STAGE_COLUMNS",
+                                    "compute_stage", "log_stage_change")),
       str([k for k in ("_create_board_tab", "board_tree", "BOARD_COLUMNS",
-                       "get_cycle_lifetime_stats", "board_frame") if k in src_wu]))
-lbl_board = app.notebook.tab(app.notebook.tabs()[-1], "text")
+                       "get_cycle_lifetime_stats", "board_frame",
+                       "_create_stage_tab", "stage_tree", "STAGE_COLUMNS",
+                       "compute_stage", "log_stage_change") if k in src_wu]))
+i_stage = src_ui.index("self._create_stage_tab()", i_forget)
+check("stage được tạo SAU board trong start_automation (board áp chót, stage cuối)",
+      i_board < i_stage < src_ui.index("def run_thread_pool"), f"{i_board} < {i_stage}")
+check("__init__ gọi _create_stage_tab() sau _create_board_tab()",
+      src_ui.index("self._create_board_tab()", src_ui.index("def __init__")) <
+      src_ui.index("self._create_stage_tab()", src_ui.index("def __init__")))
+check("_create_stage_tab duoc goi o ca __init__ lan start_automation",
+      src_ui.count("self._create_stage_tab()") == 2,
+      str(src_ui.count("self._create_stage_tab()")))
+check("start_automation cảnh báo lệch pha (chỉ hỏi, không tự đổi)",
+      "Lệch chế độ ngâm" in src_ui and "Vẫn chạy với chế độ đã chọn?" in src_ui)
+check("worker tự ghi mốc giai đoạn (log_stage_change source=auto)",
+      'db.log_stage_change(' in src_ui and 'source="auto"' in src_ui)
+check("db_handler có compute_stage / get_stage_overview / backfill_stage_tracking",
+      all(k in src_db for k in ("def compute_stage(", "def get_stage_overview(",
+                                "def backfill_stage_tracking(")))
+check("migration stage có backup trước ALTER + abort khi backup fail",
+      'backup_database(reason="pre-migration-stage' in src_db or
+      ("_migrate_stage_tracking" in src_db and "BỎ QUA migration" in src_db))
+lbl_board = app.notebook.tab(app.notebook.tabs()[-2], "text")
 check("nhãn tab board ASCII + tiếng Việt, không emoji", "THỜI LƯỢNG CHẠY" in lbl_board, repr(lbl_board))
+lbl_stage = app.notebook.tab(app.notebook.tabs()[-1], "text")
+check("nhãn tab giai đoạn không emoji", "GIAI ĐOẠN NGÂM" in lbl_stage, repr(lbl_stage))
 
 # =====================================================================
 hr("9. Dọn dẹp + DB THẬT không bị đụng")

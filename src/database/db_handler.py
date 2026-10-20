@@ -2,6 +2,143 @@ import sqlite3
 import datetime
 import os
 import shutil
+import sys
+
+def _say(msg):
+    """In ra console một cách CHỐNG TREO/CHỐNG SẬP.
+
+    Bối cảnh (v1.5.0): EXE PyInstaller chạy với stdout pipe mã hoá **cp1252**, nên mọi
+    ``print`` chứa tiếng Việt có dấu raise UnicodeEncodeError. Tầng DB được gọi NGAY LÚC
+    mở app (di chuyển schema, backup) -- TRƯỚC khi ``ui_main`` kịp thay sys.stdout bằng
+    ThreadSafeStdout -- nên một dấu ``Đ`` trong log backup từng làm sập cả ứng dụng.
+    Vì vậy mọi log của tầng DB đi qua đây: thử in nguyên văn, nếu encoding không nhận
+    thì thay ký tự lỗi bằng '?' (mất dấu nhưng giữ được dòng log và giữ được app).
+    """
+    try:
+        print(msg)
+        return
+    except UnicodeEncodeError:
+        pass
+    except Exception:
+        return
+    try:
+        enc = getattr(sys.stdout, "encoding", None) or "ascii"
+        print(str(msg).encode(enc, "replace").decode(enc, "replace"))
+    except Exception:
+        pass
+
+
+
+# ================= GIAI ĐOẠN NGÂM (v1.5.0) — mô hình 6 giai đoạn theo sheet SOP =================
+# Sheet "Auto ngâm mail" định nghĩa 2 đồng hồ khác nhau:
+#   Đồng hồ A (từ start_date): Giai đoạn 0 = Ngày 1..4, lắp proxy CHƯA có mail.
+#   Đồng hồ B (từ mail_date):  Ngày 1 = lần login Gmail đầu tiên -> mốc Hagrid 7 ngày.
+# Bảng dưới quy đổi 2 đồng hồ đó thành 6 mã S0..S5 để UI/DB nói cùng 1 ngôn ngữ.
+STAGE_CODES = ["S0", "S1", "S2", "S3", "S4", "S5"]
+STAGE_NAMES = {
+    "S0": "Làm ấm profile (proxy, chưa mail)",
+    "S1": "Móng bảo mật",
+    "S2": "Mô phỏng hành vi",
+    "S3": "Định hình thuật toán",
+    "S4": "Ngâm kênh",
+    "S5": "Vượt Hagrid",
+}
+# Nhãn "Giai đoạn N" đúng như sheet (S1 = Giai đoạn 1 ... S5 = Giai đoạn 4) để user đối chiếu.
+STAGE_SHEET_LABELS = {
+    "S0": "Giai đoạn 0",
+    "S1": "Giai đoạn 1",
+    "S2": "Giai đoạn 2",
+    "S3": "Giai đoạn 3",
+    "S4": "Ngâm kênh",
+    "S5": "Giai đoạn 4",
+}
+STAGE0_DAYS = 4              # S0 = Ngày 1..4 tính từ start_date
+HAGRID_DAYS = 7              # đồng hồ B: 7 ngày để mở khoá hành động nhạy cảm
+# Pha bot (workflow/warmup.py) suy ra từ giai đoạn — người vận hành có thể ép bằng phase_override.
+STAGE_SUGGESTED_PHASE = {"S0": "clean", "S1": "mail", "S2": "mail",
+                         "S3": "mail", "S4": "youtube", "S5": "youtube"}
+VALID_PHASES = ("clean", "mail", "youtube")
+
+
+def _parse_iso_date(value):
+    """'YYYY-MM-DD' -> datetime.date. Rỗng/sai -> None."""
+    try:
+        return datetime.date.fromisoformat(str(value).strip())
+    except Exception:
+        return None
+
+
+def compute_stage(start_date, mail_date, today=None):
+    """
+    Tính giai đoạn hiện tại của 1 profile từ 2 mốc ngày (logic THUẦN, không đọc DB).
+
+    start_date: ngày bắt đầu ngâm proxy ('YYYY-MM-DD') — mở đồng hồ A (S0).
+    mail_date : ngày login Gmail đầu tiên ('YYYY-MM-DD') — mở đồng hồ B (S1..S5).
+    today     : datetime.date | None (mặc định hôm nay) — cho phép test bơm ngày.
+
+    Trả về dict:
+        stage        'S0'..'S5' | '' (chưa có mốc ngày nào)
+        stage_name   tên tiếng Việt
+        sheet_label  'Giai đoạn 0'..'Giai đoạn 4' | 'Ngâm kênh'
+        clock        'A' (S0) | 'B' (S1+) | ''
+        day_no       số ngày thứ N trong đồng hồ đang chạy (1-based)
+        day_total    tổng số ngày của đồng hồ (4 cho A, 7 cho B)
+        day_label    'D2/4' | 'H5/7'
+        days_left    số ngày còn lại tới mốc kế (>=0)
+        overdue      True khi đã quá mốc mà chưa sang giai đoạn kế
+        offset       số ngày kể từ mốc neo (âm = mốc ở tương lai)
+    """
+    today = today or datetime.date.today()
+    out = {"stage": "", "stage_name": "", "sheet_label": "", "clock": "",
+           "day_no": None, "day_total": None, "day_label": "", "days_left": None,
+           "overdue": False, "offset": None, "start_date": start_date or "",
+           "mail_date": mail_date or ""}
+
+    md = _parse_iso_date(mail_date)
+    if md is not None:
+        offset = (today - md).days
+        out["offset"] = offset
+        if offset <= 0:
+            stage = "S1"
+        elif offset <= 3:
+            stage = "S2"
+        elif offset == 4:
+            stage = "S3"
+        elif offset == 5:
+            stage = "S4"
+        else:
+            stage = "S5"
+        day_no = offset + 1
+        if day_no < 1:
+            day_no = 1
+        out.update(stage=stage, clock="B", day_no=day_no, day_total=HAGRID_DAYS,
+                   day_label=f"H{day_no}/{HAGRID_DAYS}",
+                   days_left=max(0, HAGRID_DAYS - day_no))
+        if offset < 0:
+            out["overdue"] = True   # mail_date ở tương lai — dữ liệu nhập sai
+    else:
+        sd = _parse_iso_date(start_date)
+        if sd is not None:
+            offset = (today - sd).days
+            day_no = offset + 1
+            out["offset"] = offset
+            if day_no >= 1:
+                stage = "S0"        # kể cả đã quá 4 ngày vẫn là S0 nhưng đánh dấu overdue
+                out.update(stage=stage, clock="A", day_no=day_no, day_total=STAGE0_DAYS,
+                           day_label=f"D{day_no}/{STAGE0_DAYS}",
+                           days_left=max(0, STAGE0_DAYS - day_no + 1),
+                           overdue=day_no > STAGE0_DAYS)
+
+    if out["stage"]:
+        out["stage_name"] = STAGE_NAMES[out["stage"]]
+        out["sheet_label"] = STAGE_SHEET_LABELS[out["stage"]]
+    return out
+
+
+def suggested_phase(stage):
+    """Pha bot nên dùng cho giai đoạn này ('clean'/'mail'/'youtube'); stage rỗng -> 'clean'."""
+    return STAGE_SUGGESTED_PHASE.get(stage or "", "clean")
+
 
 class DatabaseHandler:
     def __init__(self, db_path=None):
@@ -110,12 +247,31 @@ class DatabaseHandler:
             CREATE INDEX IF NOT EXISTS idx_cycle_history_profile
             ON cycle_history (profile_id, finished_at)
         ''')
+        # v1.5.0: GIAI ĐOẠN NGÂM (S0..S5) — 'stage_history' = sổ append-only ghi MỌI lần đổi
+        # giai đoạn của 1 profile (source: auto|manual|backfill) để truy vết & hiển thị lịch sử.
+        # Bảng mới hoàn toàn: CREATE IF NOT EXISTS, không ALTER -> không cần backup migration.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS stage_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                profile_id TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                entered_at TEXT NOT NULL,
+                source TEXT NOT NULL,
+                note TEXT
+            )
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_stage_history_profile
+            ON stage_history (profile_id, entered_at)
+        ''')
         conn.commit()
         conn.close()
         # Sprint 2: bảo đảm schema mới (status/duration_s/error) — idempotent, tự backup trước khi đổi
         self._migrate_activity_history()
         # v1.4.1: thêm cột target_s cho DB đã tạo từ v1.4.0 — idempotent, backup trước khi đổi
         self._migrate_cycle_history()
+        # v1.5.0: thêm 4 cột giai đoạn cho profile_timeline — idempotent, backup trước khi đổi
+        self._migrate_stage_tracking()
 
     def backup_database(self, reason="manual"):
         """
@@ -130,10 +286,10 @@ class DatabaseHandler:
             stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             dst = os.path.join(backup_dir, f"agent_logs_{stamp}.db")
             shutil.copy2(self.db_path, dst)
-            print(f"[+] Đã backup DB ({reason}) -> {dst}")
+            _say(f"[+] Đã backup DB ({reason}) -> {dst}")
             return dst
         except Exception as e:
-            print(f"[!] Backup DB lỗi (bỏ qua, không ảnh hưởng bot): {e}")
+            _say(f"[!] Backup DB lỗi (bỏ qua, không ảnh hưởng bot): {e}")
             return None
 
     def _migrate_activity_history(self):
@@ -155,16 +311,16 @@ class DatabaseHandler:
                 return
             backup_path = self.backup_database(reason="pre-migration")
             if not backup_path:
-                print("[!] Không backup được trước migration — BỎ QUA migration an toàn.")
+                _say("[!] Không backup được trước migration — BỎ QUA migration an toàn.")
                 conn.close()
                 return
             for name, typ in missing:
                 cursor.execute(f"ALTER TABLE activity_history ADD COLUMN {name} {typ}")
             conn.commit()
             conn.close()
-            print(f"[+] Migration activity_history xong: thêm {', '.join(n for n, _ in missing)}")
+            _say(f"[+] Migration activity_history xong: thêm {', '.join(n for n, _ in missing)}")
         except Exception as e:
-            print(f"[!] Migration activity_history lỗi (bỏ qua): {e}")
+            _say(f"[!] Migration activity_history lỗi (bỏ qua): {e}")
 
     def _migrate_cycle_history(self):
         """
@@ -182,15 +338,48 @@ class DatabaseHandler:
                 return
             backup_path = self.backup_database(reason="pre-migration-cycle-target")
             if not backup_path:
-                print("[!] Không backup được trước migration cycle_history — BỎ QUA migration an toàn.")
+                _say("[!] Không backup được trước migration cycle_history — BỎ QUA migration an toàn.")
                 conn.close()
                 return
             cursor.execute("ALTER TABLE cycle_history ADD COLUMN target_s REAL")
             conn.commit()
             conn.close()
-            print("[+] Migration cycle_history xong: thêm target_s")
+            _say("[+] Migration cycle_history xong: thêm target_s")
         except Exception as e:
-            print(f"[!] Migration cycle_history lỗi (bỏ qua): {e}")
+            _say(f"[!] Migration cycle_history lỗi (bỏ qua): {e}")
+
+    def _migrate_stage_tracking(self):
+        """
+        v1.5.0: bổ sung 4 cột cho 'profile_timeline' (DB tạo từ v1.3.5 chưa có):
+            mail_date      'YYYY-MM-DD' — ngày login Gmail ĐẦU TIÊN (mốc khởi động đồng hồ Hagrid 7 ngày)
+            phase_override '' | clean | mail | youtube — người vận hành ép pha, ưu tiên hơn pha suy ra
+            niche          chủ đề ngách của kênh (dùng từ giai đoạn S4)
+            note           ghi chú tự do
+        Idempotent (PRAGMA table_info). BẮT BUỘC backup trước khi ALTER; backup fail -> bỏ qua an toàn.
+        """
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA table_info(profile_timeline)")
+            cols = {r[1] for r in cursor.fetchall()}
+            wanted = [("mail_date", "TEXT"), ("phase_override", "TEXT"),
+                      ("niche", "TEXT"), ("note", "TEXT")]
+            missing = [(n, t) for n, t in wanted if n not in cols]
+            if not missing:
+                conn.close()
+                return
+            backup_path = self.backup_database(reason="pre-migration-stage")
+            if not backup_path:
+                _say("[!] Không backup được trước migration stage — BỎ QUA migration an toàn.")
+                conn.close()
+                return
+            for name, typ in missing:
+                cursor.execute(f"ALTER TABLE profile_timeline ADD COLUMN {name} {typ}")
+            conn.commit()
+            conn.close()
+            _say("[+] Migration stage xong: thêm " + ", ".join(n for n, _ in missing))
+        except Exception as e:
+            _say(f"[!] Migration stage lỗi (bỏ qua): {e}")
 
     def can_subscribe_today(self, profile_id):
         """
@@ -209,10 +398,10 @@ class DatabaseHandler:
         
         # Nếu đã có dữ liệu và ngày cuối cùng sub chính là hôm nay
         if row and row[0] == today_str:
-            print(f"[*] Profile {profile_id} đã hết lượt Sub hôm nay. Sẽ chuyển sang chế độ chỉ Đọc báo/Xem video.")
+            _say(f"[*] Profile {profile_id} đã hết lượt Sub hôm nay. Sẽ chuyển sang chế độ chỉ Đọc báo/Xem video.")
             return False
                 
-        print(f"[+] Profile {profile_id} chưa Sub hôm nay. Đủ điều kiện thực hiện kịch bản Đăng ký kênh.")
+        _say(f"[+] Profile {profile_id} chưa Sub hôm nay. Đủ điều kiện thực hiện kịch bản Đăng ký kênh.")
         return True
 
     def log_sub_success(self, profile_id):
@@ -232,7 +421,7 @@ class DatabaseHandler:
         
         conn.commit()
         conn.close()
-        print(f"[+] Đã ghi log Database: Profile {profile_id} vừa Sub thành công vào lúc {today_str}.")
+        _say(f"[+] Đã ghi log Database: Profile {profile_id} vừa Sub thành công vào lúc {today_str}.")
 
     # ================= GOOGLE ALERTS =================
     def alert_exists(self, profile_id, query):
@@ -265,7 +454,7 @@ class DatabaseHandler:
         count = cursor.fetchone()[0]
         conn.close()
         if count > 0:
-            print(f"[*] Profile {profile_id} đã tạo alert trong {days} ngày gần nhất. Bỏ qua tạo mới.")
+            _say(f"[*] Profile {profile_id} đã tạo alert trong {days} ngày gần nhất. Bỏ qua tạo mới.")
             return False
         return True
 
@@ -283,7 +472,7 @@ class DatabaseHandler:
         )
         conn.commit()
         conn.close()
-        print(f"[+] Đã ghi log Database: Profile {profile_id} vừa tạo alert '{query.strip()}' lúc {now_str}.")
+        _say(f"[+] Đã ghi log Database: Profile {profile_id} vừa tạo alert '{query.strip()}' lúc {now_str}.")
 
     # ================= ACTIVITY / REPORTING (Task 5) =================
     def log_activity(self, profile_id, action, platform="", url="", title="",
@@ -312,7 +501,7 @@ class DatabaseHandler:
             conn.close()
             return True
         except Exception as e:
-            print(f"[!] log_activity lỗi (bỏ qua, không ảnh hưởng bot): {e}")
+            _say(f"[!] log_activity lỗi (bỏ qua, không ảnh hưởng bot): {e}")
             return False
 
     def get_activity_summary(self, profile_id=None, days=7):
@@ -424,7 +613,7 @@ class DatabaseHandler:
                 pass
             conn.close()
         except Exception as e:
-            print(f"[!] get_profile_dashboard_info lỗi (bỏ qua): {e}")
+            _say(f"[!] get_profile_dashboard_info lỗi (bỏ qua): {e}")
         return info
 
     # ================= MỐC NUÔI ACC 7 NGÀY (v1.3.5) =================
@@ -432,21 +621,27 @@ class DatabaseHandler:
         """
         Đặt/cập nhật NGÀY BẮT ĐẦU ngâm cho profile (định dạng 'YYYY-MM-DD').
         Người vận hành tự khai trên app (dialog Mốc nuôi acc) — quy ước Ngày 1 = Giai đoạn 0.
+        v1.5.0: KHÔNG dùng INSERT OR REPLACE nữa (sẽ xoá trắng mail_date/phase_override/niche/note
+        của các cột mới) — UPDATE trước, chỉ INSERT khi dòng chưa tồn tại.
         Best-effort: lỗi chỉ in cảnh báo, trả về False.
         """
         try:
             conn = sqlite3.connect(self.db_path)
             now_str = datetime.datetime.now().isoformat(timespec="seconds")
-            conn.execute(
-                "INSERT OR REPLACE INTO profile_timeline (profile_id, start_date, updated_at) "
-                "VALUES (?, ?, ?)",
-                (profile_id, date_str, now_str),
+            cur = conn.execute(
+                "UPDATE profile_timeline SET start_date=?, updated_at=? WHERE profile_id=?",
+                (date_str, now_str, profile_id),
             )
+            if cur.rowcount == 0:
+                conn.execute(
+                    "INSERT INTO profile_timeline (profile_id, start_date, updated_at) VALUES (?, ?, ?)",
+                    (profile_id, date_str, now_str),
+                )
             conn.commit()
             conn.close()
             return True
         except Exception as e:
-            print(f"[!] set_profile_start_date lỗi (bỏ qua): {e}")
+            _say(f"[!] set_profile_start_date lỗi (bỏ qua): {e}")
             return False
 
     def get_profile_start_dates(self):
@@ -458,7 +653,7 @@ class DatabaseHandler:
             conn.close()
             return out
         except Exception as e:
-            print(f"[!] get_profile_start_dates lỗi (bỏ qua): {e}")
+            _say(f"[!] get_profile_start_dates lỗi (bỏ qua): {e}")
             return {}
 
     def milestone_notified(self, profile_id, milestone):
@@ -486,9 +681,287 @@ class DatabaseHandler:
             )
             conn.commit()
             conn.close()
-            print(f"[+] Đã ghi log Database: Profile {profile_id} tới mốc '{milestone}' lúc {now_str}.")
+            _say(f"[+] Đã ghi log Database: Profile {profile_id} tới mốc '{milestone}' lúc {now_str}.")
         except Exception as e:
-            print(f"[!] log_milestone lỗi (bỏ qua): {e}")
+            _say(f"[!] log_milestone lỗi (bỏ qua): {e}")
+
+    # ================= GIAI ĐOẠN NGÂM S0..S5 (v1.5.0) =================
+    def set_profile_mail_date(self, profile_id, date_str):
+        """
+        Đặt NGÀY LOGIN GMAIL ĐẦU TIÊN ('YYYY-MM-DD') — mốc khởi động đồng hồ Hagrid 7 ngày.
+        date_str rỗng/None = xoá mốc (profile quay về đồng hồ A / S0).
+        Best-effort: lỗi chỉ in cảnh báo, trả về False.
+        """
+        try:
+            value = date_str or None
+            conn = sqlite3.connect(self.db_path)
+            now_str = datetime.datetime.now().isoformat(timespec="seconds")
+            cur = conn.execute(
+                "UPDATE profile_timeline SET mail_date=?, updated_at=? WHERE profile_id=?",
+                (value, now_str, profile_id),
+            )
+            if cur.rowcount == 0:
+                conn.execute(
+                    "INSERT INTO profile_timeline (profile_id, mail_date, updated_at) "
+                    "VALUES (?, ?, ?)",
+                    (profile_id, value, now_str),
+                )
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            _say(f"[!] set_profile_mail_date lỗi (bỏ qua): {e}")
+            return False
+
+    def set_profile_stage_meta(self, profile_id, phase_override=None, niche=None,
+                               note=None, clear_fields=()):
+        """
+        Cập nhật các trường phụ của 1 profile: phase_override / niche / note.
+        Chỉ ghi trường nào khác None (clear_fields = danh sách trường cần xoá trắng).
+        Best-effort: lỗi chỉ in cảnh báo, trả về False.
+        """
+        sets, params = [], []
+        for col, val in (("phase_override", phase_override), ("niche", niche), ("note", note)):
+            if col in clear_fields:
+                sets.append(f"{col}=?")
+                params.append(None)
+            elif val is not None:
+                if col == "phase_override" and val not in VALID_PHASES:
+                    continue
+                sets.append(f"{col}=?")
+                params.append(val)
+        if not sets:
+            return True
+        try:
+            now_str = datetime.datetime.now().isoformat(timespec="seconds")
+            sets.append("updated_at=?")
+            params.append(now_str)
+            params.append(profile_id)
+            conn = sqlite3.connect(self.db_path)
+            cur = conn.execute(
+                f"UPDATE profile_timeline SET {', '.join(sets)} WHERE profile_id=?", params
+            )
+            if cur.rowcount == 0:
+                conn.execute(
+                    "INSERT INTO profile_timeline (profile_id, updated_at) VALUES (?, ?)",
+                    (profile_id, now_str),
+                )
+                cols, vals = [], []
+                for col, val in (("phase_override", phase_override), ("niche", niche),
+                                 ("note", note)):
+                    if col in clear_fields:
+                        continue
+                    if val is not None and (col != "phase_override" or val in VALID_PHASES):
+                        cols.append(col)
+                        vals.append(val)
+                if cols:
+                    conn.execute(
+                        f"UPDATE profile_timeline SET {', '.join(c + '=?' for c in cols)} "
+                        "WHERE profile_id=?", vals + [profile_id]
+                    )
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            _say(f"[!] set_profile_stage_meta lỗi (bỏ qua): {e}")
+            return False
+
+    def get_profile_stage_rows(self):
+        """
+        {profile_id: {start_date, mail_date, phase_override, niche, note}} cho MỌI profile
+        có dòng trong profile_timeline. Lỗi -> {}.
+        """
+        out = {}
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.execute(
+                "SELECT profile_id, start_date, mail_date, phase_override, niche, note "
+                "FROM profile_timeline"
+            )
+            for pid, sd, md, po, ni, no in cursor.fetchall():
+                out[pid] = {"start_date": sd or "", "mail_date": md or "",
+                            "phase_override": po or "", "niche": ni or "", "note": no or ""}
+            conn.close()
+        except Exception as e:
+            _say(f"[!] get_profile_stage_rows lỗi (bỏ qua): {e}")
+        return out
+
+    def log_stage_change(self, profile_id, stage, source="auto", note=None):
+        """
+        Ghi 1 dòng vào 'stage_history' (sổ append-only). CHỈ ghi khi giai đoạn KHÁC lần ghi cuối
+        của profile đó (chống rác khi auto-tính lại mỗi lần mở app).
+        source: 'auto' | 'manual' | 'backfill'. Trả True nếu có ghi, False nếu bỏ qua/lỗi.
+        """
+        if not profile_id or not stage:
+            return False
+        try:
+            conn = sqlite3.connect(self.db_path)
+            row = conn.execute(
+                "SELECT stage FROM stage_history WHERE profile_id=? ORDER BY id DESC LIMIT 1",
+                (profile_id,),
+            ).fetchone()
+            if row and row[0] == stage:
+                conn.close()
+                return False
+            now_str = datetime.datetime.now().isoformat(timespec="seconds")
+            conn.execute(
+                "INSERT INTO stage_history (profile_id, stage, entered_at, source, note) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (profile_id, stage, now_str, source or "auto", note),
+            )
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            _say(f"[!] log_stage_change lỗi (bỏ qua): {e}")
+            return False
+
+    def get_stage_history(self, profile_id, limit=50):
+        """[{'stage','entered_at','source','note'}, ...] mới nhất trước. Lỗi -> []."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.execute(
+                "SELECT stage, entered_at, source, note FROM stage_history "
+                "WHERE profile_id=? ORDER BY id DESC LIMIT ?",
+                (profile_id, int(limit)),
+            )
+            out = [{"stage": r[0], "entered_at": r[1], "source": r[2], "note": r[3]}
+                   for r in cursor.fetchall()]
+            conn.close()
+            return out
+        except Exception as e:
+            _say(f"[!] get_stage_history lỗi (bỏ qua): {e}")
+            return []
+
+    def get_stage_overview(self, today=None):
+        """
+        Bảng giai đoạn cho TOÀN BỘ profile có dòng timeline:
+            pid -> {stage, stage_name, sheet_label, clock, day_no, day_total, day_label,
+                    days_left, overdue, offset, start_date, mail_date, phase_override,
+                    niche, note, suggested_phase, effective_phase, phase_forced,
+                    warnings: [str], evidence: {has_alert, has_yt, last_action, last_activity}}
+        `effective_phase` = phase_override (nếu hợp lệ) ngược lại suggested_phase.
+        Best-effort: lỗi -> {}.
+        """
+        today = today or datetime.date.today()
+        out = {}
+        try:
+            rows = self.get_profile_stage_rows()
+            if not rows:
+                return {}
+            conn = sqlite3.connect(self.db_path)
+            ev = {}
+
+            def _fill(sql, key):
+                try:
+                    for pid, val in conn.execute(sql).fetchall():
+                        ev.setdefault(pid, {})[key] = val
+                except Exception:
+                    pass
+
+            _fill("SELECT profile_id, MAX(created_at) FROM activity_history GROUP BY profile_id",
+                  "last_activity")
+            _fill("SELECT profile_id, MAX(created_at) FROM alert_history GROUP BY profile_id",
+                  "last_alert")
+            _fill("SELECT profile_id, MAX(created_at) FROM activity_history "
+                  "WHERE platform='YouTube' OR action LIKE '%youtube%' OR action='watch_video' "
+                  "GROUP BY profile_id", "last_yt")
+            conn.close()
+            for pid, meta in rows.items():
+                info = compute_stage(meta.get("start_date"), meta.get("mail_date"), today)
+                info.update(meta)
+                sug = suggested_phase(info["stage"])
+                forced = (meta.get("phase_override") or "").strip()
+                if forced in VALID_PHASES:
+                    info["effective_phase"] = forced
+                    info["phase_forced"] = True
+                else:
+                    info["effective_phase"] = sug
+                    info["phase_forced"] = False
+                info["suggested_phase"] = sug
+                e = ev.get(pid, {})
+                info["evidence"] = {
+                    "has_alert": bool(e.get("last_alert")),
+                    "has_yt": bool(e.get("last_yt")),
+                    "last_action": e.get("last_activity"),
+                    "last_activity": e.get("last_activity"),
+                }
+                info["warnings"] = self._stage_warnings(info, today)
+                out[pid] = info
+        except Exception as e:
+            _say(f"[!] get_stage_overview lỗi (bỏ qua): {e}")
+        return out
+
+    @staticmethod
+    def _stage_warnings(info, today):
+        """Danh sách cảnh báo vận hành cho 1 profile (dùng cho cột 'Cảnh báo' + badge)."""
+        warns = []
+        stage = info.get("stage") or ""
+        if not stage:
+            warns.append("chưa đặt ngày bắt đầu")
+            return warns
+        if info.get("overdue"):
+            if info.get("clock") == "A":
+                warns.append("quá 4 ngày vẫn chưa có mail — cần login Gmail để mở đồng hồ Hagrid")
+            else:
+                warns.append("ngày mail ở tương lai — kiểm tra lại")
+        sd = _parse_iso_date(info.get("start_date"))
+        if not info.get("mail_date") and sd is not None:
+            waited = (today - sd).days
+            if waited > 7:
+                warns.append(f"đã {waited} ngày không có mail — acc đang bị kẹt ở S0")
+        if stage in ("S3", "S4", "S5"):
+            ev = info.get("evidence") or {}
+            if not ev.get("has_yt"):
+                warns.append("đã tới giai đoạn YouTube nhưng chưa có hoạt động YouTube nào")
+        if stage == "S5" and not info.get("evidence", {}).get("last_alert"):
+            pass  # sub check cần DB riêng — để UI tự bổ sung nếu cần
+        return warns
+
+    def backfill_stage_tracking(self):
+        """
+        v1.5.0 — điền dữ liệu giai đoạn cho các profile ĐÃ có dấu vết chạy nhưng chưa có timeline.
+        Quy tắc (an toàn, không ghi đè dữ liệu người vận hành đã nhập):
+            1. Chưa có start_date + có activity_history -> start_date = MIN(created_at).date()
+            2. Chưa có mail_date + có alert_history      -> CHỈ trả về gợi ý (không tự ghi)
+            3. Mọi profile có start_date -> ghi 1 dòng stage_history source='backfill' nếu trống
+        Trả về {'filled_start': n, 'logged': n, 'mail_hints': {pid: 'YYYY-MM-DD'}}.
+        """
+        result = {"filled_start": 0, "logged": 0, "mail_hints": {}}
+        try:
+            rows = self.get_profile_stage_rows()
+            conn = sqlite3.connect(self.db_path)
+            first_act = dict(conn.execute(
+                "SELECT profile_id, MIN(created_at) FROM activity_history GROUP BY profile_id"
+            ).fetchall())
+            first_alert = dict(conn.execute(
+                "SELECT profile_id, MIN(created_at) FROM alert_history GROUP BY profile_id"
+            ).fetchall())
+            conn.close()
+            for pid, first in first_act.items():
+                d = _parse_iso_date(str(first or "")[:10])
+                if d is None:
+                    continue
+                meta = rows.get(pid) or {}
+                if not (meta.get("start_date") or "").strip():
+                    if self.set_profile_start_date(pid, d.isoformat()):
+                        result["filled_start"] += 1
+                        rows.setdefault(pid, {})["start_date"] = d.isoformat()
+            for pid, first in first_alert.items():
+                meta = rows.get(pid) or {}
+                if not (meta.get("mail_date") or "").strip():
+                    d = _parse_iso_date(str(first or "")[:10])
+                    if d is not None:
+                        result["mail_hints"][pid] = d.isoformat()
+            for pid, meta in rows.items():
+                info = compute_stage(meta.get("start_date"), meta.get("mail_date"))
+                if info["stage"] and self.log_stage_change(
+                        pid, info["stage"], source="backfill",
+                        note="tự điền từ dữ liệu chạy cũ"):
+                    result["logged"] += 1
+        except Exception as e:
+            _say(f"[!] backfill_stage_tracking lỗi (bỏ qua): {e}")
+        return result
 
     # ================= THỜI GIAN NGÂM THEO CHU TRÌNH (v1.4.0) =================
     def log_cycle(self, profile_id, started_at, finished_at, duration_s, status,
@@ -511,7 +984,7 @@ class DatabaseHandler:
             conn.close()
             return True
         except Exception as e:
-            print(f"[!] log_cycle lỗi (bỏ qua, không ảnh hưởng bot): {e}")
+            _say(f"[!] log_cycle lỗi (bỏ qua, không ảnh hưởng bot): {e}")
             return False
 
     def get_cycle_summary(self, profile_id=None, days=30, target_s=0):
@@ -569,7 +1042,7 @@ class DatabaseHandler:
                 pass
             conn.close()
         except Exception as e:
-            print(f"[!] get_cycle_summary lỗi (bỏ qua): {e}")
+            _say(f"[!] get_cycle_summary lỗi (bỏ qua): {e}")
         return out
 
     def get_cycle_rows(self, profile_id, days=90, limit=200):
@@ -589,7 +1062,7 @@ class DatabaseHandler:
             conn.close()
             return rows
         except Exception as e:
-            print(f"[!] get_cycle_rows lỗi (bỏ qua): {e}")
+            _say(f"[!] get_cycle_rows lỗi (bỏ qua): {e}")
             return []
 
     def get_cycle_lifetime_stats(self):
@@ -635,7 +1108,7 @@ class DatabaseHandler:
                     out[pid]["last_at"] = fin or ""
             conn.close()
         except Exception as e:
-            print(f"[!] get_cycle_lifetime_stats lỗi (bỏ qua): {e}")
+            _say(f"[!] get_cycle_lifetime_stats lỗi (bỏ qua): {e}")
         return out
 
     def get_last_cycle_targets(self, days=30):
@@ -655,5 +1128,5 @@ class DatabaseHandler:
                 out[pid] = tgt
             conn.close()
         except Exception as e:
-            print(f"[!] get_last_cycle_targets lỗi (bỏ qua): {e}")
+            _say(f"[!] get_last_cycle_targets lỗi (bỏ qua): {e}")
         return out

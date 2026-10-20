@@ -19,6 +19,27 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../')))
 from src.browser.browser_factory import BrowserFactory, BROWSER_GPM, BROWSER_BITBROWSER
 from src.browser.playwright_core import BrowserController
 from src.database.db_handler import DatabaseHandler
+# v1.5.0: GIAI ĐOẠN NGÂM — UI và tầng DB dùng CHUNG một nguồn sự thật (tránh 2 chỗ định
+# nghĩa STAGE0_DAYS lệch nhau). Fallback để app vẫn mở được nếu db_handler quá cũ.
+try:
+    from src.database.db_handler import (
+        STAGE0_DAYS, HAGRID_DAYS, VALID_PHASES, STAGE_CODES,
+        STAGE_NAMES, STAGE_SHEET_LABELS, compute_stage, suggested_phase,
+    )
+except ImportError:  # pragma: no cover - chỉ xảy ra với bản DB cũ
+    STAGE0_DAYS, HAGRID_DAYS = 4, 7
+    VALID_PHASES = ("clean", "mail", "youtube")
+    STAGE_CODES = ["S0", "S1", "S2", "S3", "S4", "S5"]
+    STAGE_NAMES, STAGE_SHEET_LABELS = {}, {}
+
+    def compute_stage(start_date, mail_date, today=None):
+        return {"stage": "", "stage_name": "", "sheet_label": "", "clock": "",
+                "day_no": None, "day_total": None, "day_label": "", "days_left": None,
+                "overdue": False, "offset": None,
+                "start_date": start_date or "", "mail_date": mail_date or ""}
+
+    def suggested_phase(stage):
+        return "youtube" if stage in ("S4", "S5") else "clean"
 from src.workflow.warmup import WarmupWorkflow
 from src.agent.brain_manager import BrainManager
 from src.logger import append_line, LOG_DIR
@@ -110,13 +131,14 @@ GROUP_ALL = "Tất cả nhóm"
 UNGROUPED_LABEL = "Chưa có nhóm"
 
 # ==========================================
-# v1.3.5: MỐC NUÔI ACC 7 NGÀY (theo sheet "Auto ngm mail")
+# v1.3.5: MỐC NUÔI ACC 7 NGÀY (theo sheet "Auto ngâm mail")
 # Giai đoạn 0 = lắp proxy CHƯA lắp mail, bot tự ngâm 4 ngày (Ngày 1-4).
 # Hết 4 ngày (từ Ngày 5) tới lúc NGƯỜI LÀM TAY: lắp mail + Móng bảo mật
 # (đăng nhập Gmail sạch, 2SV, email/SĐT khôi phục, ESB — sheet dòng 3).
 # App popup nhắc 1 lần/profile (dedup qua milestone_history), không spam mỗi lần mở.
+# v1.5.0: STAGE0_DAYS KHÔNG còn khai báo ở đây — import từ src.database.db_handler
+# (một nguồn sự thật duy nhất cho cả UI lẫn DB).
 # ==========================================
-STAGE0_DAYS = 4
 STAGE1_MILESTONE_CODE = "mail_manual_stage1"
 STAGE1_TASKS_TEXT = (
     "Việc cần làm tay (sheet dòng 3 — Móng bảo mật):\n"
@@ -196,6 +218,8 @@ class ThreadSafeStdout:
                 self.stdout.write(msg.encode(enc, "replace").decode(enc, "replace"))
             except Exception:
                 pass
+        except Exception:
+            pass  # console chết (EXE đóng pipe giữa chừng) — GUI/file vẫn phải chạy
         if msg.strip('\n'):
             tid = threading.get_ident()
             slot = THREAD_SLOTS.get(tid, "MAIN")
@@ -275,6 +299,17 @@ def run_single_profile(api, profile_id, profile_name, themes, slot_index, screen
     _cyc["phase"] = phase
     _cyc.pop("duration_s", None)
     _cyc.pop("target_s", None)
+
+    # v1.5.0: tự ghi mốc giai đoạn của acc này (log_stage_change tự dedup với row cuối
+    # -> gọi mỗi vòng vẫn an toàn, không phình bảng stage_history).
+    try:
+        _srow = db.get_profile_stage_rows().get(profile_id) or {}
+        _sinfo = compute_stage(_srow.get("start_date") or "", _srow.get("mail_date") or "")
+        if _sinfo.get("stage"):
+            db.log_stage_change(profile_id, _sinfo["stage"], source="auto",
+                                note=f"phase={phase}")
+    except Exception as e:
+        print(f"[{profile_name}] [!] Không ghi được mốc giai đoạn (bỏ qua): {e}")
 
     # Khởi tạo AI Brain nếu được chọn
     brain = None
@@ -890,6 +925,10 @@ class AutomationApp:
         self.btn_api_keys = ttk.Button(card_ctl, text="QUẢN LÝ API KEY (CẦN MẬT KHẨU)",
                                        command=self.open_api_key_manager, style="Tool.TButton")
         self.btn_api_keys.grid(row=8, column=0, columnspan=3, sticky="we", pady=(6, 0))
+        # v1.5.0: bảng lộ trình ngâm acc — mỗi kênh đang ở giai đoạn nào (S0 → S5)
+        self.btn_stage = ttk.Button(card_ctl, text="GIAI ĐOẠN NGÂM (S0 → S5)",
+                                    command=self.show_stage_board, style="Tool.TButton")
+        self.btn_stage.grid(row=9, column=0, columnspan=3, sticky="we", pady=(6, 0))
 
         # ---------- Thẻ ngang dưới: cặp từ khóa Google ↔ YouTube (hành vi 1.4 giữ nguyên) ----------
         card_kw = ttk.Labelframe(outer, text="  CẶP TỪ KHÓA — GOOGLE ↔ YOUTUBE  ", padding=(12, 8))
@@ -923,6 +962,9 @@ class AutomationApp:
         # --- STATUS BAR (Sprint 0.2): heartbeat các slot, màu theo trạng thái ---
         self._running = False
         self._active_slots = []
+        # v1.5.0: cache bảng giai đoạn — bảng thời lượng + tab "GIAI ĐOẠN NGÂM" dùng chung
+        self._stage_cache = None
+        self._stage_cache_at = 0.0
         self.var_status = tk.StringVar(value=f"Sẵn sàng · {self._version_line}")
         self.lbl_status = tk.Label(root, textvariable=self.var_status, anchor="w",
                                    bg=self.C_STATUS_BG, fg=self.C_STATUS_FG,
@@ -934,14 +976,23 @@ class AutomationApp:
         self.notebook.pack(fill="both", expand=True, padx=10, pady=(4, 10))
 
         self.log_boxes = {}
+        # v1.5.0 FIX CRASH: bọc sys.stdout PHẢI đặt ở ĐÂY — trước khi tạo tab bảng
+        # thời lượng / tab GIAI ĐOẠN NGÂM, vì cả hai tab đều chạm DatabaseHandler() ngay
+        # trong lúc dựng (refresh -> get_stage_overview -> _create_tables -> migration).
+        # Bản cũ đặt sau `_create_stage_tab()` nên log tiếng Việt của tầng DB bắn thẳng vào
+        # stdout cp1252 của EXE -> UnicodeEncodeError -> app sập trước khi kịp mở cửa sổ.
+        sys.stdout = ThreadSafeStdout(self.append_log)
         self._create_tab("MAIN")
         # v1.4.9: tab "THỜI LƯỢNG CHẠY" — LUÔN tạo SAU MAIN và được nối lại vào CUỐI
         # notebook mỗi lần Start, nên tabs()[slot_index + 1] của update_tab_name không lệch.
         self.board_frame = None
         self.var_board_days = None
         self._create_board_tab()
-
-        sys.stdout = ThreadSafeStdout(self.append_log)
+        # v1.5.0: tab "GIAI ĐOẠN NGÂM" — nối SAU bảng thời lượng để thứ tự tab ổn định
+        self.stage_frame = None
+        self.var_stage_filter = None
+        self.var_stage_warn = None
+        self._create_stage_tab()
 
         # Sprint 1.1: khôi phục lựa chọn của phiên trước + tự lưu khi đóng app
         self._apply_loaded_config()
@@ -1048,16 +1099,42 @@ class AutomationApp:
         self.root.after(0, _update)
 
     # ==========================================================
+    # v1.5.0: GIAI ĐOẠN NGÂM — nguồn dữ liệu dùng CHUNG cho bảng thời lượng
+    # và tab "GIAI ĐOẠN NGÂM" (1 query/refresh thay vì 2).
+    # ==========================================================
+    def _stage_overview_cached(self, force=False, max_age=5.0):
+        """{pid: info} từ DatabaseHandler.get_stage_overview(), cache trong self._stage_cache.
+
+        force=True  -> đọc lại DB ngay (sau khi user sửa ngày/pha/ghi chú).
+        max_age     -> giây; trong khoảng này dùng lại kết quả cũ (2 bảng cùng refresh).
+        """
+        now = time.time()
+        cache = getattr(self, "_stage_cache", None)
+        if (not force and cache is not None
+                and now - getattr(self, "_stage_cache_at", 0.0) < max_age):
+            return cache
+        try:
+            data = DatabaseHandler().get_stage_overview()
+        except Exception as e:
+            print(f"[!] Không đọc được bảng giai đoạn (bỏ qua): {e}")
+            data = {}
+        self._stage_cache = data
+        self._stage_cache_at = now
+        return data
+
+    # ==========================================================
     # v1.4.9: BOARD THỜI LƯỢNG CHẠY — tab riêng, luôn nhìn thấy
     # ==========================================================
-    BOARD_COLUMNS = ("name", "group", "id", "running", "cycles", "today", "total_all",
+    BOARD_COLUMNS = ("name", "group", "stage", "id", "running", "cycles", "today", "total_all",
                      "avg", "actions", "first", "days", "last_dur", "result", "last_at")
-    BOARD_HEADERS = {"name": "Tài khoản", "group": "Nhóm", "id": "ID", "running": "Đang chạy",
+    BOARD_HEADERS = {"name": "Tài khoản", "group": "Nhóm", "stage": "Giai đoạn", "id": "ID",
+                     "running": "Đang chạy",
                      "cycles": "Số vòng", "today": "Hôm nay", "total_all": "Tổng mọi thời",
                      "avg": "TB/vòng", "actions": "Hành động", "first": "Ngày đầu",
                      "days": "Ngày ngâm", "last_dur": "Vòng cuối", "result": "Kết quả",
                      "last_at": "Xong lúc"}
-    BOARD_WIDTHS = {"name": 152, "group": 92, "id": 74, "running": 88, "cycles": 58,
+    BOARD_WIDTHS = {"name": 152, "group": 92, "stage": 104, "id": 74, "running": 88,
+                    "cycles": 58,
                     "today": 74, "total_all": 94, "avg": 70, "actions": 74, "first": 90,
                     "days": 68, "last_dur": 70, "result": 100, "last_at": 112}
     # Cột sort theo SỐ (raw trong self._board_raw); các cột còn lại sort theo chuỗi.
@@ -1157,6 +1234,8 @@ class AutomationApp:
                     pids.append(pid)
             running_pid = {pid: key for key, pid in SLOT_PROFILE.items()}
             now = time.time()
+            # v1.5.0: bảng giai đoạn dùng chung cache với tab "GIAI ĐOẠN NGÂM"
+            stages = self._stage_overview_cached()
             n_cyc = tot_win = tot_all = acts_all = 0
             today_all = 0.0
             for pid in pids:
@@ -1186,9 +1265,15 @@ class AutomationApp:
                 else:
                     res = "-" if cycles_all else ""
                 today_s = lf.get("today_s", 0.0)
+                si = stages.get(pid) or {}
+                stage_txt = ""
+                if si.get("stage"):
+                    stage_txt = f"{si['stage']} · {si.get('sheet_label') or si.get('stage_name') or ''}"
+                    stage_txt = stage_txt.strip(" ·")
                 iid = tree.insert("", tk.END, values=(
                     (r.get("name") or pid)[:42],
                     (r.get("group") or UNGROUPED_LABEL)[:16] if cycles_all else "",
+                    stage_txt[:18],
                     pid[:8],
                     run_txt,
                     cycles or "",
@@ -1315,6 +1400,646 @@ class AutomationApp:
             except Exception:
                 pass
         self.root.after(15000, _auto)
+        # Để _stage_invalidate() làm mới cả cột "Giai đoạn" của bảng này
+        self._board_refresh = refresh
+
+    # ==========================================================
+    # v1.5.0: GIAI ĐOẠN NGÂM — bảng lộ trình ngâm acc (S0 → S5)
+    # ==========================================================
+    STAGE_COLUMNS = ("name", "group", "id", "stage", "stage_name", "clock", "start",
+                     "mail", "left", "sug", "last_act", "evid", "warn")
+    STAGE_HEADERS = {"name": "Tài khoản", "group": "Nhóm", "id": "ID",
+                     "stage": "Giai đoạn", "stage_name": "Tên giai đoạn",
+                     "clock": "Đồng hồ", "start": "Ngày bắt đầu", "mail": "Ngày mail",
+                     "left": "Còn lại", "sug": "Pha đề xuất",
+                     "last_act": "Hoạt động cuối", "evid": "Bằng chứng",
+                     "warn": "Cảnh báo"}
+    STAGE_WIDTHS = {"name": 148, "group": 86, "id": 74, "stage": 122, "stage_name": 188,
+                    "clock": 66, "start": 92, "mail": 92, "left": 58, "sug": 112,
+                    "last_act": 112, "evid": 150, "warn": 226}
+    # Cột sort theo SỐ (raw trong self._stage_raw); còn lại sort theo chuỗi.
+    STAGE_NUM_COLS = ("left",)
+    STAGE_PHASE_SHORT = {"clean": "1 · Acc mới", "mail": "2 · Nuôi Google",
+                         "youtube": "3 · Cày YouTube"}
+    STAGE_FILTER_ALL = "Tất cả"
+    STAGE_FILTER_NONE = "Chưa xác định"
+
+    def _create_stage_tab(self):
+        """Tạo (hoặc tạo lại) tab "GIAI ĐOẠN NGÂM". Luôn nằm CUỐI notebook (sau bảng
+        thời lượng) nên công thức tabs()[slot_index + 1] của update_tab_name vẫn đúng.
+        Không đăng ký vào log_boxes (tab bảng, không phải khung log)."""
+        old = getattr(self, "stage_frame", None)
+        if old is not None:
+            try:
+                old.destroy()
+            except Exception:
+                pass
+        # Giữ bộ lọc đã chọn giữa các lần tạo lại (Start tạo lại tab này)
+        _prev_filter = self.STAGE_FILTER_ALL
+        _prev_warn = False
+        try:
+            if self.var_stage_filter is not None:
+                _prev_filter = self.var_stage_filter.get() or self.STAGE_FILTER_ALL
+        except Exception:
+            pass
+        try:
+            if self.var_stage_warn is not None:
+                _prev_warn = bool(self.var_stage_warn.get())
+        except Exception:
+            pass
+
+        frame = ttk.Frame(self.notebook)
+        self.notebook.add(frame, text=" GIAI ĐOẠN NGÂM ")
+        self.stage_frame = frame
+
+        bar = ttk.Frame(frame, padding=(10, 8, 10, 2))
+        bar.pack(fill="x")
+        ttk.Label(bar, text="S0 → S5 · D = chưa có mail (4 ngày) · H = đã có mail (Hagrid 7 ngày).",
+                  style="Muted.TLabel").pack(side="left")
+        ttk.Button(bar, text="Làm mới", width=9,
+                   command=lambda: refresh(force=True)).pack(side="right")
+        self.var_stage_filter = tk.StringVar(value=_prev_filter)
+        self.cbo_stage_filter = ttk.Combobox(
+            bar, textvariable=self.var_stage_filter, state="readonly", width=14,
+            values=[self.STAGE_FILTER_ALL] + list(STAGE_CODES) + [self.STAGE_FILTER_NONE])
+        self.cbo_stage_filter.pack(side="right", padx=(4, 10))
+        self.cbo_stage_filter.bind("<<ComboboxSelected>>", lambda e: refresh())
+        ttk.Label(bar, text="Giai đoạn:").pack(side="right", padx=(10, 0))
+        self.var_stage_warn = tk.BooleanVar(value=_prev_warn)
+        self.chk_stage_warn = ttk.Checkbutton(bar, text="Chỉ hiện cảnh báo",
+                                              variable=self.var_stage_warn,
+                                              command=lambda: refresh())
+        self.chk_stage_warn.pack(side="right", padx=(8, 0))
+        ttk.Button(bar, text="Tự điền từ dữ liệu cũ", width=20,
+                   command=self.run_stage_backfill).pack(side="right", padx=(0, 8))
+
+        body = ttk.Frame(frame)
+        body.pack(fill="both", expand=True, padx=10, pady=(4, 0))
+        tree = ttk.Treeview(body, columns=self.STAGE_COLUMNS, show="headings")
+        self.stage_tree = tree
+        for col in self.STAGE_COLUMNS:
+            tree.heading(col, text=self.STAGE_HEADERS[col],
+                         command=lambda c=col: sort_by(c))
+            tree.column(col, width=self.STAGE_WIDTHS[col],
+                        anchor="w" if col in ("name", "group", "stage_name", "start",
+                                              "mail", "last_act", "evid", "warn")
+                        else "center")
+        scroll = ttk.Scrollbar(body, command=tree.yview)
+        tree.configure(yscrollcommand=scroll.set)
+        scroll.pack(side="right", fill="y")
+        tree.pack(side="left", fill="both", expand=True)
+
+        self._stage_status = ttk.Label(frame, text="", style="Muted.TLabel")
+        self._stage_status.pack(anchor="w", padx=12, pady=(4, 0))
+        ttk.Label(frame,
+                  text="Double-click một dòng để xem chi tiết giai đoạn + lịch sử chuyển giai đoạn. "
+                       "Bảng tự tươi mỗi 15 giây khi app đang chạy.",
+                  style="Muted.TLabel").pack(anchor="w", padx=12, pady=(0, 8))
+
+        # Virtual event để test mở được dialog (Tk build này cấm event_generate("<Double-1>")).
+        tree.bind("<Double-1>", lambda e: show_detail())
+        tree.bind("<<ShowStageDetail>>", lambda e: show_detail())
+
+        self._stage_raw = {}
+        _sort = {"col": None, "rev": False}
+
+        def _row_name(pid, si):
+            r = {x["id"]: x for x in (self.profile_rows or [])}.get(pid, {})
+            nm = r.get("name") or (si or {}).get("name") or pid
+            return nm
+
+        def refresh(force=False):
+            for item in tree.get_children():
+                tree.delete(item)
+            self._stage_raw = {}
+            stages = self._stage_overview_cached(force=force)
+            if force:
+                # Nút "Làm mới" phải làm tươi CẢ hai bảng (dùng chung cache 5s)
+                self._stage_cache = stages
+                self._stage_cache_at = time.time()
+            known = {r["id"]: r for r in (self.profile_rows or [])}
+            pids, seen = [], set()
+            for pid in list(known.keys()) + list(stages.keys()):
+                if pid and pid not in seen:
+                    seen.add(pid)
+                    pids.append(pid)
+            try:
+                flt = (self.var_stage_filter.get() or self.STAGE_FILTER_ALL).strip()
+            except Exception:
+                flt = self.STAGE_FILTER_ALL
+            warn_only = False
+            try:
+                warn_only = bool(self.var_stage_warn.get())
+            except Exception:
+                pass
+
+            def _order(pid):
+                si = stages.get(pid) or {}
+                code = si.get("stage") or ""
+                idx = STAGE_CODES.index(code) if code in STAGE_CODES else len(STAGE_CODES)
+                return (idx, _row_name(pid, si).lower())
+
+            n_warn = n_hidden = 0
+            by_stage = {}
+            for pid in sorted(pids, key=_order):
+                r = known.get(pid, {})
+                si = stages.get(pid) or {}
+                code = si.get("stage") or ""
+                warns = si.get("warnings") or []
+                by_stage[code] = by_stage.get(code, 0) + 1
+                if warns:
+                    n_warn += 1
+                show = True
+                if flt == self.STAGE_FILTER_NONE:
+                    show = not code
+                elif flt != self.STAGE_FILTER_ALL:
+                    show = (code == flt)
+                if show and warn_only and not warns:
+                    show = False
+                if not show:
+                    n_hidden += 1
+                    continue
+                stage_txt = ""
+                if code:
+                    stage_txt = f"{code} · {si.get('sheet_label') or si.get('stage_name') or ''}"
+                    stage_txt = stage_txt.strip(" ·")
+                sug = si.get("suggested_phase") or ""
+                sug_txt = self.STAGE_PHASE_SHORT.get(sug, sug)
+                if si.get("phase_forced"):
+                    sug_txt += " (ép)"
+                ev = si.get("evidence") or {}
+                bits = []
+                if ev.get("has_alert"):
+                    bits.append("Alert")
+                if ev.get("has_yt"):
+                    bits.append("YouTube")
+                if ev.get("last_action"):
+                    bits.append(str(ev["last_action"])[:24])
+                evid_txt = " · ".join(bits)
+                left = si.get("days_left")
+                iid = tree.insert("", tk.END, values=(
+                    _row_name(pid, si)[:42],
+                    (r.get("group") or UNGROUPED_LABEL)[:16] if r else "",
+                    pid[:8],
+                    stage_txt,
+                    (si.get("stage_name") or "")[:40],
+                    si.get("day_label") or "",
+                    si.get("start_date") or "",
+                    si.get("mail_date") or "",
+                    left if (left is not None and code) else "",
+                    sug_txt,
+                    (ev.get("last_activity") or "")[:19].replace("T", " "),
+                    evid_txt[:40],
+                    "; ".join(warns)[:96],
+                ))
+                self._stage_raw[iid] = {"pid": pid, "stage": code,
+                                        "left": left if code else None}
+            txt = f"{len(pids)} profile"
+            parts = [f"{c} {by_stage[c]}"
+                     for c in STAGE_CODES if by_stage.get(c)]
+            if by_stage.get(""):
+                parts.append(f"chưa xác định {by_stage['']}")
+            if parts:
+                txt += " · " + " · ".join(parts)
+            txt += f" · {n_warn} cảnh báo"
+            if n_hidden:
+                txt += f" · {n_hidden} bị ẩn bởi bộ lọc"
+            self._stage_status.config(text=txt)
+
+        def sort_by(col):
+            """Sort theo cột; click lại cột đang sort = đảo chiều (header hiện ▲/▼).
+            Click ĐẦU TIÊN: cột số -> giảm dần, cột chữ -> tăng dần.
+            Ô thiếu dữ liệu (None) luôn nằm CUỐI dù sort chiều nào."""
+            reverse = (not _sort["rev"]) if _sort["col"] == col \
+                else (col in self.STAGE_NUM_COLS)
+            allitems = list(tree.get_children())
+            if col in self.STAGE_NUM_COLS:
+                have = [i for i in allitems
+                        if self._stage_raw.get(i, {}).get(col) is not None]
+                miss = [i for i in allitems
+                        if self._stage_raw.get(i, {}).get(col) is None]
+                have.sort(key=lambda i: self._stage_raw[i][col], reverse=reverse)
+                items = have + miss
+            else:
+                items = sorted(allitems,
+                               key=lambda i: str(tree.set(i, col)).lower(),
+                               reverse=reverse)
+            for idx, iid in enumerate(items):
+                tree.move(iid, "", idx)
+            _sort["rev"] = reverse
+            _sort["col"] = col
+            for c in self.STAGE_COLUMNS:
+                mark = ""
+                if c == col:
+                    mark = " ▼" if reverse else " ▲"
+                tree.heading(c, text=self.STAGE_HEADERS[c] + mark)
+
+        def show_detail(_event=None):
+            sel = tree.selection()
+            if not sel:
+                return
+            pid = self._stage_raw.get(sel[0], {}).get("pid")
+            if pid:
+                self.show_stage_detail(pid)
+
+        refresh()
+
+        # Nút "GIAI ĐOẠN NGÂM" ở card điều khiển cần gọi lại refresh dù tab chưa hiện
+        self._stage_refresh = refresh
+
+        # Tự tươi 15s (chỉ khi tab còn tồn tại — vòng cũ tự chết khi frame bị destroy lúc Start)
+        def _auto():
+            try:
+                if frame.winfo_exists():
+                    refresh()
+                    self.root.after(15000, _auto)
+            except Exception:
+                pass
+        self.root.after(15000, _auto)
+
+    # ---------------- GIAI ĐOẠN NGÂM: điều hướng + chi tiết + backfill (v1.5.0) ----------------
+    def _profile_name_of(self, pid):
+        """Tên hiển thị của 1 profile: checklist hiện tại -> config đã lưu -> pid rút gọn."""
+        for r in (self.profile_rows or []):
+            if r.get("id") == pid and r.get("name"):
+                return r["name"]
+        for p in ((self.cfg or {}).get("profiles") or []):
+            if p.get("id") == pid and p.get("name"):
+                return p["name"]
+        return (pid or "")[:8]
+
+    def _stage_invalidate(self):
+        """Xoá cache giai đoạn rồi làm mới cả tab GIAI ĐOẠN NGÂM lẫn cột "Giai đoạn" của bảng thời lượng."""
+        self._stage_cache = None
+        self._stage_cache_at = 0.0
+        stage_fn = getattr(self, "_stage_refresh", None)
+        if callable(stage_fn):
+            try:
+                stage_fn(force=True)
+            except Exception as e:
+                print(f"[!] Không làm mới được bảng giai đoạn: {e}")
+        board_fn = getattr(self, "_board_refresh", None)
+        if callable(board_fn):
+            try:
+                board_fn()
+            except Exception:
+                pass
+
+    def show_stage_board(self):
+        """Nút "GIAI ĐOẠN NGÂM" ở card điều khiển: chọn tab giai đoạn rồi làm mới ngay."""
+        try:
+            for tid in self.notebook.tabs():
+                if str(self.notebook.tab(tid, "text")).strip() == "GIAI ĐOẠN NGÂM":
+                    self.notebook.select(tid)
+                    break
+        except Exception:
+            pass
+        stage_fn = getattr(self, "_stage_refresh", None)
+        if callable(stage_fn):
+            try:
+                stage_fn(force=True)
+            except Exception as e:
+                print(f"[!] Không làm mới được bảng giai đoạn: {e}")
+
+    def show_stage_detail(self, pid):
+        """Dialog chi tiết 1 profile: tóm tắt giai đoạn + sửa mốc ngày + lịch sử chuyển giai đoạn."""
+        if not pid:
+            return
+        db = DatabaseHandler()
+        win = tk.Toplevel(self.root)
+        win.title(f"Giai đoạn ngâm — {self._profile_name_of(pid)}")
+        win.configure(bg=self.C_CARD)
+        win.geometry("1000x660")
+
+        def _info():
+            info = (self._stage_overview_cached() or {}).get(pid)
+            if info:
+                return info
+            # get_stage_overview() trả {} khi profile CHƯA có dòng profile_timeline
+            meta = db.get_profile_stage_rows().get(pid) or {}
+            info = compute_stage(meta.get("start_date"), meta.get("mail_date"))
+            info.update(meta)
+            sug = suggested_phase(info.get("stage") or "")
+            forced = (meta.get("phase_override") or "").strip()
+            info["suggested_phase"] = sug
+            info["effective_phase"] = forced if forced in VALID_PHASES else sug
+            info["phase_forced"] = forced in VALID_PHASES
+            info["warnings"] = DatabaseHandler._stage_warnings(info, datetime.date.today())
+            info["evidence"] = {"has_alert": False, "has_yt": False,
+                                "last_action": None, "last_activity": None}
+            return info
+
+        vals, tree = {}, None
+
+        def _refresh():
+            info = _info()
+            vals["name"].config(text=f"{self._profile_name_of(pid)}  ·  {pid}")
+            stage = info.get("stage") or ""
+            if stage:
+                vals["stage"].config(
+                    text=f"{stage} · {info.get('stage_name') or ''}"
+                         f"   [{info.get('sheet_label') or ''}]")
+            else:
+                vals["stage"].config(text="chưa xác định — hãy đặt ngày bắt đầu")
+            clock = info.get("clock") or ""
+            if clock in ("A", "B"):
+                total = STAGE0_DAYS if clock == "A" else HAGRID_DAYS
+                label = "trước mail" if clock == "A" else "Hagrid"
+                left = info.get("days_left")
+                vals["clock"].config(
+                    text=f"{clock} · {label} ({total} ngày) · {info.get('day_label') or '—'}"
+                         + (f" · còn {left} ngày" if left is not None else ""))
+            else:
+                vals["clock"].config(text="—")
+            vals["dates"].config(
+                text=f"{(info.get('start_date') or '—')}   /   {(info.get('mail_date') or '—')}")
+            sug = info.get("suggested_phase") or "clean"
+            eff = info.get("effective_phase") or sug
+            pin = "  (ghim tay)" if info.get("phase_forced") else ""
+            vals["phase"].config(
+                text=f"đề xuất: {self.STAGE_PHASE_SHORT.get(sug, sug)}   ·   "
+                     f"đang dùng: {self.STAGE_PHASE_SHORT.get(eff, eff)}{pin}")
+            ev = info.get("evidence") or {}
+            parts = ["Alert: " + ("có" if ev.get("has_alert") else "chưa"),
+                     "YouTube: " + ("có" if ev.get("has_yt") else "chưa")]
+            if ev.get("last_action"):
+                parts.append("chạy cuối: " + str(ev["last_action"])[:19].replace("T", " "))
+            vals["evid"].config(text="   ·   ".join(parts))
+            warns = info.get("warnings") or []
+            vals["warn"].config(text="\n".join("• " + w for w in warns) if warns else "—")
+            for iid in tree.get_children():
+                tree.delete(iid)
+            try:
+                hist = db.get_stage_history(pid, limit=50)
+            except Exception:
+                hist = []
+            for h in hist:
+                tree.insert("", tk.END, values=(
+                    h.get("stage") or "",
+                    (h.get("entered_at") or "")[:19].replace("T", " "),
+                    h.get("source") or "",
+                    h.get("note") or ""))
+            if not hist:
+                tree.insert("", tk.END, values=(
+                    "", "", "", "chưa có lịch sử — bấm “Ghi mốc hiện tại” để bắt đầu sổ"))
+
+        def _after_write():
+            self._stage_invalidate()
+            _refresh()
+
+        def _set_start(value):
+            if db.set_profile_start_date(pid, value):
+                _after_write()
+            else:
+                messagebox.showerror("Giai đoạn ngâm",
+                                     "Không ghi được ngày bắt đầu vào DB.", parent=win)
+
+        def act_start_today():
+            _set_start(datetime.date.today().isoformat())
+
+        def act_start_other():
+            from tkinter import simpledialog
+            raw = simpledialog.askstring(
+                "Ngày bắt đầu", "Nhập ngày bắt đầu ngâm (YYYY-MM-DD hoặc DD/MM/YYYY):",
+                initialvalue=(_info().get("start_date") or datetime.date.today().isoformat()),
+                parent=win)
+            if raw is None:
+                return
+            if not raw.strip():
+                _set_start("")
+                return
+            d = self._parse_date_input(raw)
+            if not d:
+                messagebox.showerror("Giai đoạn ngâm", f"Không hiểu ngày “{raw}”.", parent=win)
+                return
+            _set_start(d)
+
+        def _set_mail(value):
+            if db.set_profile_mail_date(pid, value):
+                _after_write()
+            else:
+                messagebox.showerror("Giai đoạn ngâm",
+                                     "Không ghi được ngày mail vào DB.", parent=win)
+
+        def act_mail_today():
+            _set_mail(datetime.date.today().isoformat())
+
+        def act_mail_other():
+            from tkinter import simpledialog
+            raw = simpledialog.askstring(
+                "Ngày login Gmail", "Nhập ngày login Gmail đầu tiên (mở đồng hồ Hagrid):",
+                initialvalue=(_info().get("mail_date") or datetime.date.today().isoformat()),
+                parent=win)
+            if raw is None:
+                return
+            if not raw.strip():
+                _set_mail("")
+                return
+            d = self._parse_date_input(raw)
+            if not d:
+                messagebox.showerror("Giai đoạn ngâm", f"Không hiểu ngày “{raw}”.", parent=win)
+                return
+            _set_mail(d)
+
+        def act_mail_clear():
+            _set_mail("")
+
+        def act_pin_phase():
+            key = {v: k for k, v in self.STAGE_PHASE_SHORT.items()}.get(var_pin.get())
+            if not key:
+                return
+            if db.set_profile_stage_meta(pid, phase_override=key):
+                _after_write()
+            else:
+                messagebox.showerror("Giai đoạn ngâm", "Không ghi được pha ghim.", parent=win)
+
+        def act_unpin_phase():
+            if db.set_profile_stage_meta(pid, clear_fields=("phase_override",)):
+                _after_write()
+
+        def act_note():
+            from tkinter import simpledialog
+            cur = (_info().get("note") or "")
+            raw = simpledialog.askstring("Ghi chú", "Ghi chú cho tài khoản này:",
+                                         initialvalue=cur, parent=win)
+            if raw is None:
+                return
+            if raw.strip():
+                db.set_profile_stage_meta(pid, note=raw.strip())
+            else:
+                db.set_profile_stage_meta(pid, clear_fields=("note",))
+            _after_write()
+
+        def act_log_now():
+            info = _info()
+            stage = info.get("stage") or ""
+            if not stage:
+                messagebox.showwarning("Giai đoạn ngâm",
+                                       "Chưa đặt ngày bắt đầu nên chưa có giai đoạn để ghi.",
+                                       parent=win)
+                return
+            if db.log_stage_change(pid, stage, source="manual",
+                                   note="ghi tay từ dialog chi tiết"):
+                self._stage_cache = None
+                self._stage_cache_at = 0.0
+            _refresh()
+
+        ttk.Label(
+            win,
+            text=("S0 → S5 theo 2 đồng hồ: TRƯỚC mail = 4 ngày (D1..D4), SAU mail = Hagrid 7 ngày "
+                  "(H1..H7). Mọi thay đổi bên dưới ghi thẳng vào DB và làm mới bảng ngay."),
+            style="Muted.TLabel", wraplength=940, justify="left").pack(
+            anchor="w", padx=12, pady=(10, 6))
+
+        sumf = ttk.Frame(win, padding=(12, 0))
+        sumf.pack(fill="x")
+        sumf.columnconfigure(1, weight=1)
+        specs = (("name", "Tài khoản"), ("stage", "Giai đoạn"), ("clock", "Đồng hồ"),
+                 ("dates", "Bắt đầu / mail"), ("phase", "Pha"),
+                 ("evid", "Bằng chứng"), ("warn", "Cảnh báo"))
+        for i, (key, label) in enumerate(specs):
+            tk.Label(sumf, text=label + ":", bg=self.C_CARD, fg=self.C_MUTED,
+                     font=("Segoe UI", 9), anchor="w").grid(
+                row=i, column=0, sticky="w", pady=1, padx=(0, 8))
+            fg = self.C_FG
+            if key == "stage":
+                fg = self.C_ACCENT
+            elif key == "warn":
+                fg = self.C_WARN_FG
+            lbl = tk.Label(sumf, text="—", bg=self.C_CARD, fg=fg,
+                           font=("Segoe UI", 9), anchor="w", justify="left",
+                           wraplength=800)
+            lbl.grid(row=i, column=1, sticky="we", pady=1)
+            vals[key] = lbl
+
+        var_pin = tk.StringVar(value=self.STAGE_PHASE_SHORT.get("clean", "clean"))
+
+        btn_area = ttk.Frame(win, padding=(12, 4, 12, 10))
+        btn_area.pack(fill="x", side="bottom")
+
+        r1 = ttk.Frame(btn_area)
+        r1.pack(fill="x", pady=(0, 3))
+        ttk.Label(r1, text="Ngày bắt đầu:", style="Muted.TLabel", width=14,
+                  anchor="w").pack(side="left")
+        ttk.Button(r1, text="Hôm nay", style="Tool.TButton", width=10,
+                   command=act_start_today).pack(side="left")
+        ttk.Button(r1, text="Ngày khác…", style="Tool.TButton", width=12,
+                   command=act_start_other).pack(side="left", padx=(6, 0))
+        ttk.Button(r1, text="Xoá", style="Tool.TButton", width=6,
+                   command=lambda: _set_start("")).pack(side="left", padx=(6, 0))
+
+        r2 = ttk.Frame(btn_area)
+        r2.pack(fill="x", pady=(0, 3))
+        ttk.Label(r2, text="Ngày login mail:", style="Muted.TLabel", width=14,
+                  anchor="w").pack(side="left")
+        ttk.Button(r2, text="Hôm nay", style="Tool.TButton", width=10,
+                   command=act_mail_today).pack(side="left")
+        ttk.Button(r2, text="Ngày khác…", style="Tool.TButton", width=12,
+                   command=act_mail_other).pack(side="left", padx=(6, 0))
+        ttk.Button(r2, text="Xoá", style="Tool.TButton", width=6,
+                   command=act_mail_clear).pack(side="left", padx=(6, 0))
+
+        r3 = ttk.Frame(btn_area)
+        r3.pack(fill="x", pady=(0, 3))
+        ttk.Label(r3, text="Ghim pha:", style="Muted.TLabel", width=14,
+                  anchor="w").pack(side="left")
+        cbo_pin = ttk.Combobox(r3, textvariable=var_pin, state="readonly", width=18,
+                               values=list(self.STAGE_PHASE_SHORT.values()))
+        cbo_pin.pack(side="left")
+        ttk.Button(r3, text="Ghim", style="Tool.TButton", width=7,
+                   command=act_pin_phase).pack(side="left", padx=(6, 0))
+        ttk.Button(r3, text="Bỏ ghim", style="Tool.TButton", width=9,
+                   command=act_unpin_phase).pack(side="left", padx=(6, 0))
+        ttk.Button(r3, text="Ghi chú…", style="Tool.TButton", width=10,
+                   command=act_note).pack(side="left", padx=(12, 0))
+        ttk.Button(r3, text="Ghi mốc hiện tại", style="Tool.TButton", width=17,
+                   command=act_log_now).pack(side="left", padx=(6, 0))
+
+        r4 = ttk.Frame(btn_area)
+        r4.pack(fill="x")
+        ttk.Button(r4, text="Đóng", width=10, command=win.destroy).pack(side="right")
+
+        ttk.Label(win, text="Lịch sử chuyển giai đoạn (stage_history — mới nhất trước):",
+                  style="Muted.TLabel").pack(anchor="w", padx=12, pady=(10, 2))
+        hist_cols = ("stage", "entered", "source", "note")
+        hist_spec = (("stage", "Giai đoạn", 90, "center"), ("entered", "Thời điểm", 150, "w"),
+                     ("source", "Nguồn", 90, "center"), ("note", "Ghi chú", 520, "w"))
+        tree = ttk.Treeview(win, columns=hist_cols, show="headings", height=6)
+        for col, head, width, anchor in hist_spec:
+            tree.heading(col, text=head)
+            tree.column(col, width=width, anchor=anchor)
+        hsc = ttk.Scrollbar(win, command=tree.yview)
+        tree.configure(yscrollcommand=hsc.set)
+        hsc.pack(side="right", fill="y")
+        tree.pack(fill="both", expand=True, padx=(12, 0), pady=(0, 4))
+
+        _refresh()
+        win.after(120, lambda: cbo_pin.set(self.STAGE_PHASE_SHORT.get(
+            (_info().get("effective_phase") or "clean"), "clean")))
+
+    def run_stage_backfill(self):
+        """Nút "Tự điền từ dữ liệu cũ": điền start_date cho profile đã chạy + gợi ý ngày mail."""
+        if not messagebox.askyesno(
+                "Tự điền từ dữ liệu cũ",
+                "Quét lại toàn bộ lịch sử chạy để điền mốc giai đoạn?\n\n"
+                "• Ngày bắt đầu = lần hoạt động ĐẦU TIÊN trong activity_history "
+                "(chỉ điền khi đang trống).\n"
+                "• Ngày mail CHỈ là gợi ý (từ Alert đầu tiên) — bạn tự bấm “Dùng” từng acc.\n"
+                "• Không ghi đè mốc bạn đã nhập tay.",
+                parent=self.root):
+            return
+        db = DatabaseHandler()
+        try:
+            res = db.backfill_stage_tracking() or {}
+        except Exception as e:
+            messagebox.showerror("Tự điền", f"Lỗi khi tự điền: {e}", parent=self.root)
+            return
+        self._stage_invalidate()
+
+        hints = res.get("mail_hints") or {}
+        win = tk.Toplevel(self.root)
+        win.title("Tự điền giai đoạn — kết quả")
+        win.configure(bg=self.C_CARD)
+        win.geometry("760x470")
+        ttk.Label(
+            win,
+            text=(f"Đã điền ngày bắt đầu cho {res.get('filled_start', 0)} profile · "
+                  f"ghi {res.get('logged', 0)} dòng lịch sử giai đoạn · "
+                  f"{len(hints)} gợi ý ngày mail cần bạn xác nhận."),
+            style="Muted.TLabel", wraplength=700, justify="left").pack(
+            anchor="w", padx=12, pady=(10, 6))
+
+        body = ttk.Frame(win)
+        body.pack(fill="both", expand=True, padx=12, pady=(0, 6))
+        _cv, inner = self._make_scrollable(body, 300)
+
+        def _use(hp, hd, btn):
+            if db.set_profile_mail_date(hp, hd):
+                btn.configure(text="đã dùng", state="disabled")
+                self._stage_invalidate()
+            else:
+                messagebox.showerror("Tự điền", "Không ghi được ngày mail.", parent=win)
+
+        if not hints:
+            ttk.Label(inner, text="Không có gợi ý ngày mail nào (chưa acc nào có alert_history).",
+                      style="Muted.TLabel").pack(anchor="w", pady=4)
+        for hp, hd in sorted(hints.items()):
+            rowf = ttk.Frame(inner)
+            rowf.pack(fill="x", pady=2)
+            ttk.Label(rowf, text=f"{self._profile_name_of(hp)}  ·  {hp[:8]}", width=44,
+                      anchor="w").pack(side="left")
+            ttk.Label(rowf, text=hd, width=12).pack(side="left", padx=(4, 8))
+            b = ttk.Button(rowf, text="Dùng", style="Tool.TButton", width=8)
+            b.configure(command=lambda p=hp, d=hd, btn=b: _use(p, d, btn))
+            b.pack(side="left")
+        ttk.Label(inner, text="Gợi ý lấy từ ngày tạo Google Alert ĐẦU TIÊN — chỉ là mốc tham khảo, "
+                              "hãy đối chiếu với ngày bạn thực sự login Gmail.",
+                  style="Muted.TLabel", wraplength=660, justify="left").pack(
+            anchor="w", pady=(8, 2))
+
+        bar = ttk.Frame(win, padding=(12, 4, 12, 10))
+        bar.pack(fill="x", side="bottom")
+        ttk.Button(bar, text="Đóng", width=10, command=win.destroy).pack(side="right")
 
     # ==========================================================
     # SPRINT 1: khung cuộn được (checklist profile + cặp từ khóa)
@@ -2591,6 +3316,38 @@ clearly tách nhóm hơn kiểu label trần + separator."""
             )
             return
 
+        # v1.5.0: cảnh báo LỆCH "Chế độ ngâm" so với giai đoạn thật của từng acc.
+        # Chỉ cảnh báo + đề xuất — KHÔNG tự đổi lựa chọn của người dùng (quyết định v1.5.0).
+        _phase_sel = PHASE_MAP.get(self.var_phase_label.get(), "clean")
+        try:
+            _ov = self._stage_overview_cached() or {}
+            _sel = set(profiles)
+            _mismatch = [
+                (pid, info) for pid, info in _ov.items()
+                if pid in _sel and (info.get("effective_phase") or "") != _phase_sel
+            ]
+        except Exception:
+            _mismatch = []
+        if _mismatch:
+            _lines = []
+            for _pid, _info in _mismatch[:10]:
+                _sug = _info.get("effective_phase") or ""
+                _lines.append(
+                    f"• {self._profile_name_of(_pid)} ({_pid[:8]}): "
+                    f"{_info.get('stage') or '?'} — đề xuất "
+                    f"{self.STAGE_PHASE_SHORT.get(_sug, _sug or '?')}"
+                )
+            if len(_mismatch) > 10:
+                _lines.append(f"… và {len(_mismatch) - 10} acc khác")
+            if not messagebox.askyesno(
+                "Lệch chế độ ngâm",
+                f"Bạn chọn chế độ ngâm:\n  {PHASE_LABEL_BY_KEY.get(_phase_sel, _phase_sel)}\n\n"
+                f"{len(_mismatch)}/{len(profiles)} acc đang ở giai đoạn KHÁC chế độ này:\n\n"
+                + "\n".join(_lines)
+                + "\n\nVẫn chạy với chế độ đã chọn?  (chọn No để quay lại chỉnh)",
+            ):
+                return
+
         STOP_EVENT.clear()  # phiên mới: xóa cờ dừng của lần trước
 
         self.btn_start.config(state="disabled", text="ĐANG CHẠY...")
@@ -2601,7 +3358,8 @@ clearly tách nhóm hơn kiểu label trần + separator."""
         for btn in (self.btn_report, self.btn_open_logs, self.btn_load_keywords,
                     self.btn_refresh_profiles, self.btn_add_manual,
                     self.btn_dashboard, self.btn_export_csv, self.btn_timeline,
-                    self.btn_phase_info, self.btn_cycle_time, self.btn_api_keys):
+                    self.btn_phase_info, self.btn_cycle_time, self.btn_api_keys,
+                    self.btn_stage):
             btn.config(state="disabled")
         
         for tab_name in list(self.log_boxes.keys()):
@@ -2618,6 +3376,8 @@ clearly tách nhóm hơn kiểu label trần + separator."""
         # v1.4.9: vòng forget ở trên đã gỡ tab thời lượng -> nối lại vào CUỐI cùng,
         # để slot vẫn nằm ở index 1..n_slots (công thức tabs()[slot+1] giữ nguyên).
         self._create_board_tab()
+        # v1.5.0: nối lại tab giai đoạn ngay sau bảng thời lượng (giữ đúng thứ tự tab)
+        self._create_stage_tab()
 
         self._running = True
         self._active_slots = list(range(n_slots))
@@ -2633,7 +3393,7 @@ clearly tách nhóm hơn kiểu label trần + separator."""
         skip_random_keywords = self.var_skip_random_keywords.get()
         brain_type = self.var_brain_type.get()
         # Map nhãn combobox -> phase string (warmup.py vẫn nhận key clean/mail/youtube như cũ)
-        phase = PHASE_MAP.get(self.var_phase_label.get(), "clean")
+        phase = _phase_sel  # v1.5.0: dùng lại giá trị đã tính ở khối cảnh báo lệch giai đoạn
         fixed_target_s = self._target_secs()  # v1.4.1: >0 = mục tiêu cố định; 0 = bot random mỗi vòng
         self.save_current_config()  # Sprint 1.1: nhớ mọi lựa chọn của phiên này
         threading.Thread(target=self.run_thread_pool, args=(profiles, themes, max_workers, screen_w, screen_h, skip_youtube, skip_random_keywords, browser_type, api_port, brain_type, phase, fixed_target_s), daemon=True).start()
@@ -2989,7 +3749,8 @@ clearly tách nhóm hơn kiểu label trần + separator."""
         for btn in (self.btn_report, self.btn_open_logs, self.btn_load_keywords,
                     self.btn_refresh_profiles, self.btn_add_manual,
                     self.btn_dashboard, self.btn_export_csv, self.btn_timeline,
-                    self.btn_phase_info, self.btn_cycle_time, self.btn_api_keys):
+                    self.btn_phase_info, self.btn_cycle_time, self.btn_api_keys,
+                    self.btn_stage):
             btn.config(state=state)
 
     def _apply_log_filter(self):
