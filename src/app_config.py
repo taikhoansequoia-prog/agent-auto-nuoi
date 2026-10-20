@@ -36,6 +36,8 @@ DEFAULTS = {
     "skip_random_keywords": False,
     "theme": "dark",       # v1.3.3: 'dark' | 'light' — mặc định tối như trước
     "target_cycle_minutes": 0,  # v1.4.0: mục tiêu phút cho 1 chu trình (0 = không giới hạn)
+    "daily_minutes": 30,     # v1.5.3: hạn mức PHÚT/NGÀY cho mỗi acc (0 = tắt hạn mức)
+    "pinned_theme": "",      # v1.5.3: ghim chủ đề cho phiên ("" = bot tự chọn trong danh sách)
     # v1.4.8: cổng mật khẩu cho tiện ích "QUẢN LÝ API KEY" (PBKDF2, salt+hash hex;
     # rỗng = chưa đổi -> tiện ích nhận mật khẩu khởi điểm api_vault.DEFAULT_PASSWORD)
     "api_gate_salt": "",

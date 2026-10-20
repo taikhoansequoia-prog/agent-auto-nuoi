@@ -1130,3 +1130,28 @@ class DatabaseHandler:
         except Exception as e:
             _say(f"[!] get_last_cycle_targets lỗi (bỏ qua): {e}")
         return out
+
+    def get_today_seconds(self, profile_ids=None):
+        """v1.5.3: tổng số giây ĐÃ NGÂM HÔM NAY của từng profile (hạn mức phút/ngày).
+        pid -> float. `profile_ids` = None -> mọi profile có row hôm nay.
+        Best-effort: bảng chưa có / DB trống -> {}. Không tạo row, chỉ đọc."""
+        out = {}
+        try:
+            conn = sqlite3.connect(self.db_path)
+            sql = ("SELECT profile_id, COALESCE(SUM(duration_s), 0) FROM cycle_history"
+                   " WHERE date(finished_at) = date('now','localtime')")
+            params = []
+            if profile_ids:
+                pids = [p for p in profile_ids if p]
+                if not pids:
+                    conn.close()
+                    return {}
+                sql += " AND profile_id IN (%s)" % ",".join("?" * len(pids))
+                params.extend(pids)
+            sql += " GROUP BY profile_id"
+            for pid, secs in conn.execute(sql, params).fetchall():
+                out[pid] = float(secs or 0.0)
+            conn.close()
+        except Exception as e:
+            _say(f"[!] get_today_seconds lỗi (bỏ qua): {e}")
+        return out

@@ -293,10 +293,27 @@ def adjust_window_bounds(context, slot_index, screen_w, screen_h):
 # ==========================================
 # 2. HÀM WORKER: XỬ LÝ ĐỘC LẬP CHO TỪNG PROFILE
 # ==========================================
-def run_single_profile(api, profile_id, profile_name, themes, slot_index, screen_w, screen_h, skip_youtube, skip_random_keywords, brain_type="none", phase="clean", fixed_target_s=0):
+def run_single_profile(api, profile_id, profile_name, themes, slot_index, screen_w, screen_h, skip_youtube, skip_random_keywords, brain_type="none", phase="clean", fixed_target_s=0, daily_seconds=0, pinned_theme=""):
     print(f"\n[{profile_name}] 🚀 Đang yêu cầu API mở trình duyệt...")
     
     db = DatabaseHandler()
+
+    # v1.5.3: HẠN MỨC PHÚT/NGÀY (khác "Mục tiêu vòng" — cái đó là 1 chu trình).
+    # Tổng thời gian đã ngâm TRONG NGÀY lấy từ cycle_history. Hết hạn mức thì bỏ qua acc
+    # NGAY tại đây: chưa mở trình duyệt, chưa khởi tạo _cyc -> không sinh row chu trình rỗng.
+    daily_left = 0.0
+    if daily_seconds and daily_seconds > 0:
+        try:
+            _used_s = float(db.get_today_seconds([profile_id]).get(profile_id, 0.0))
+        except Exception:
+            _used_s = 0.0
+        daily_left = max(0.0, float(daily_seconds) - _used_s)
+        if daily_left <= 120:
+            print(f"[{profile_name}] ⏭️ Bỏ qua: hôm nay đã ngâm {_fmt_dur(int(_used_s))} / "
+                  f"{_fmt_dur(int(daily_seconds))} — hết hạn mức ngày.")
+            return
+        print(f"[{profile_name}] 📆 Hạn mức ngày: đã ngâm {_fmt_dur(int(_used_s))} / "
+              f"{_fmt_dur(int(daily_seconds))} — còn {_fmt_dur(int(daily_left))}.")
 
     # v1.4.0: đếm THỜI GIAN NGÂM của chu trình này (open -> dọn dẹp; lỗi/dừng vẫn ghi).
     # Số liệu ghi vào SLOT_CYCLE_INFO theo slot (mỗi luồng 1 khóa riêng — không race).
@@ -351,7 +368,14 @@ def run_single_profile(api, profile_id, profile_name, themes, slot_index, screen
             adjust_window_bounds(context, slot_index, screen_w, screen_h)
             time.sleep(1)
             
-            session_theme = random.choice(themes)
+            # v1.5.3: GHIM CHỦ ĐỀ — người dùng nhập tay thì mọi profile của phiên dùng đúng
+            # chủ đề đó (bỏ qua random.choice trong danh sách).
+            if pinned_theme:
+                themes_use = [{"google_query": pinned_theme, "youtube_query": pinned_theme}]
+                print(f"[{profile_name}] 🎯 Chủ đề GHIM: {pinned_theme}")
+            else:
+                themes_use = themes
+            session_theme = random.choice(themes_use)
             print(f"[{profile_name}] ⚙️ Kích hoạt hệ thống với chủ đề: {session_theme['google_query']}")
             
             warmup = WarmupWorkflow(
@@ -369,6 +393,17 @@ def run_single_profile(api, profile_id, profile_name, themes, slot_index, screen
             # v1.5.2: TRẦN THỜI GIAN PHIÊN. Nếu người dùng GHIM "Mục tiêu vòng" (>0) thì mốc đó
             # vừa là mục tiêu ⏰ vừa là giới hạn cứng; để 0 -> warmup tự random 15-30 phút/phiên.
             warmup.session_deadline_s = int(fixed_target_s) if fixed_target_s and fixed_target_s > 0 else 0
+            # v1.5.3: SIẾT TRẦN PHIÊN THEO HẠN MỨC NGÀY (không vượt quá thời gian còn lại hôm nay).
+            # Trần random của core là 15-30 phút (tối đa 1800s) nên chỉ cần siết khi còn ít hơn.
+            if daily_left > 0:
+                _left = int(daily_left)
+                if warmup.session_deadline_s:
+                    if warmup.session_deadline_s > _left:
+                        warmup.session_deadline_s = _left
+                        print(f"[{profile_name}] ⏳ Trần phiên siết theo hạn mức ngày: {_fmt_dur(_left)}")
+                elif _left < 1800:
+                    warmup.session_deadline_s = _left
+                    print(f"[{profile_name}] ⏳ Trần phiên siết theo hạn mức ngày: {_fmt_dur(_left)}")
             if fixed_target_s and fixed_target_s > 0:
                 print(f"[{profile_name}] ⏳ Trần phiên: {_fmt_dur(int(fixed_target_s))} (theo mục tiêu đã ghim)")
             else:
@@ -416,7 +451,7 @@ def run_single_profile(api, profile_id, profile_name, themes, slot_index, screen
         if not STOP_EVENT.is_set():
             time.sleep(2)
 
-def worker_wrapper(app_instance, profile_id, themes, slots_queue, screen_w, screen_h, skip_youtube, skip_random_keywords, browser_type=BROWSER_GPM, api_port="", brain_type="none", phase="clean", fixed_target_s=0):
+def worker_wrapper(app_instance, profile_id, themes, slots_queue, screen_w, screen_h, skip_youtube, skip_random_keywords, browser_type=BROWSER_GPM, api_port="", brain_type="none", phase="clean", fixed_target_s=0, daily_seconds=0, pinned_theme=""):
     if STOP_EVENT.is_set():
         print(f"[Skip] Người dùng đã yêu cầu dừng - bỏ qua profile {profile_id[:8]}.")
         return
@@ -457,7 +492,7 @@ def worker_wrapper(app_instance, profile_id, themes, slots_queue, screen_w, scre
 
         app_instance.update_tab_name(slot, profile_name)
 
-        run_single_profile(api, profile_id, profile_name, themes, slot, screen_w, screen_h, skip_youtube, skip_random_keywords, brain_type, phase, fixed_target_s)
+        run_single_profile(api, profile_id, profile_name, themes, slot, screen_w, screen_h, skip_youtube, skip_random_keywords, brain_type, phase, fixed_target_s, daily_seconds, pinned_theme)
     finally:
         SLOT_THREAD_ALIVE[slot_key] = False
         # v1.4.0: ghi chu trình vào DB (kể cả dừng/lỗi giữa chừng — số liệu trung thực).
@@ -896,6 +931,17 @@ class AutomationApp:
                                                         variable=self.var_skip_random_keywords)
         self.chk_skip_random_keywords.grid(row=8, column=0, columnspan=2, sticky="w", pady=(3, 0))
 
+        # v1.5.3: HẠN MỨC PHÚT/NGÀY cho mỗi acc (khác "Mục tiêu vòng" ở trên).
+        # Mục tiêu vòng = 1 chu trình; Phút/ngày = tổng thời gian ngâm CỦA CẢ NGÀY.
+        # Hết hạn mức -> bỏ qua acc đó trong phiên (không mở trình duyệt vô ích).
+        ttk.Label(card_cfg, text="Phút/ngày:").grid(row=10, column=0, sticky="w", pady=(10, 0))
+        day_line = ttk.Frame(card_cfg)
+        day_line.grid(row=10, column=1, sticky="w", padx=(10, 0), pady=(10, 0))
+        self.spin_daily_min = ttk.Spinbox(day_line, from_=0, to=600, width=5)
+        self.spin_daily_min.pack(side="left")
+        self.spin_daily_min.set(30)
+        ttk.Label(day_line, text="phút/ngày (0 = tắt hạn mức)", style="Muted.TLabel").pack(side="left", padx=(6, 0))
+
         # ---------- Thẻ điều khiển: CTA chạy/dừng + lưới tiện ích ----------
         card_ctl = ttk.Labelframe(right, text="  ĐIỀU KHIỂN  ", padding=(12, 8))
         card_ctl.pack(fill="x")
@@ -957,6 +1003,17 @@ class AutomationApp:
                   style="Muted.TLabel").pack(side="left")
         ttk.Button(kw_head, text="+ Thêm chủ đề", command=lambda: self._add_kw_row("", "", focus=True),
                    style="Tool.TButton", width=14).pack(side="right")
+
+        # v1.5.3: GHIM CHỦ ĐỀ cho phiên này — để trống = bot tự chọn 1 dòng trong danh sách bên dưới.
+        # Ghim xong thì MỌI profile của phiên dùng đúng chủ đề đó (bỏ qua random.choice).
+        pin_line = ttk.Frame(card_kw)
+        pin_line.pack(fill="x", pady=(6, 0))
+        ttk.Label(pin_line, text="Ghim chủ đề:").pack(side="left")
+        self.var_pinned_theme = tk.StringVar(value="")
+        self.ent_pinned_theme = ttk.Entry(pin_line, textvariable=self.var_pinned_theme)
+        self.ent_pinned_theme.pack(side="left", fill="x", expand=True, padx=(6, 6))
+        ttk.Label(pin_line, text="(trống = bot tự chọn trong danh sách)", style="Muted.TLabel").pack(side="left")
+
         # Header cột canh gần đúng 2 Entry (mỗi Entry expand đều, chừa chỗ nút X ~26px)
         kw_cols = ttk.Frame(card_kw)
         kw_cols.pack(fill="x", pady=(6, 1))
@@ -2427,6 +2484,12 @@ clearly tách nhóm hơn kiểu label trần + separator."""
             self.spin_target_min.set(max(0, int(cfg.get("target_cycle_minutes", 0))))
         except (ValueError, TypeError):
             self.spin_target_min.set(0)
+        # v1.5.3: hạn mức phút/ngày + chủ đề ghim
+        try:
+            self.spin_daily_min.set(max(0, int(cfg.get("daily_minutes", 30))))
+        except (ValueError, TypeError):
+            self.spin_daily_min.set(30)
+        self.var_pinned_theme.set(str(cfg.get("pinned_theme", "") or ""))
 
     def _target_secs(self):
         """Mục tiêu 1 chu trình (giây). v1.4.1: 0 = KHÔNG ghim — bot tự random mỗi vòng
@@ -2436,6 +2499,20 @@ clearly tách nhóm hơn kiểu label trần + separator."""
             return max(0, int(float(self.spin_target_min.get()))) * 60
         except (ValueError, TypeError):
             return 0
+
+    def _daily_secs(self):
+        """v1.5.3: hạn mức ngâm TỔNG CỘNG trong 1 NGÀY cho mỗi acc (giây). 0 = tắt hạn mức."""
+        try:
+            return max(0, int(float(self.spin_daily_min.get()))) * 60
+        except (ValueError, TypeError):
+            return 30 * 60
+
+    def _pinned_theme_text(self):
+        """v1.5.3: chủ đề ghim (chuỗi rỗng = bot tự chọn trong danh sách)."""
+        try:
+            return self.var_pinned_theme.get().strip()
+        except Exception:
+            return ""
 
     def save_current_config(self):
         cfg = dict(self.cfg)
@@ -2469,6 +2546,11 @@ clearly tách nhóm hơn kiểu label trần + separator."""
             cfg["target_cycle_minutes"] = max(0, int(float(self.spin_target_min.get())))
         except (ValueError, TypeError):
             cfg["target_cycle_minutes"] = 0
+        try:  # v1.5.3: nhớ hạn mức phút/ngày
+            cfg["daily_minutes"] = max(0, int(float(self.spin_daily_min.get())))
+        except (ValueError, TypeError):
+            cfg["daily_minutes"] = 30
+        cfg["pinned_theme"] = self._pinned_theme_text()  # v1.5.3: nhớ chủ đề ghim
         self.cfg = cfg
         save_config(cfg)
 
@@ -3413,10 +3495,12 @@ clearly tách nhóm hơn kiểu label trần + separator."""
         # Map nhãn combobox -> phase string (warmup.py vẫn nhận key clean/mail/youtube như cũ)
         phase = _phase_sel  # v1.5.0: dùng lại giá trị đã tính ở khối cảnh báo lệch giai đoạn
         fixed_target_s = self._target_secs()  # v1.4.1: >0 = mục tiêu cố định; 0 = bot random mỗi vòng
+        daily_seconds = self._daily_secs()    # v1.5.3: hạn mức phút/NGÀY cho mỗi acc (0 = tắt)
+        pinned_theme = self._pinned_theme_text()  # v1.5.3: "" = bot tự chọn chủ đề trong danh sách
         self.save_current_config()  # Sprint 1.1: nhớ mọi lựa chọn của phiên này
-        threading.Thread(target=self.run_thread_pool, args=(profiles, themes, max_workers, screen_w, screen_h, skip_youtube, skip_random_keywords, browser_type, api_port, brain_type, phase, fixed_target_s), daemon=True).start()
+        threading.Thread(target=self.run_thread_pool, args=(profiles, themes, max_workers, screen_w, screen_h, skip_youtube, skip_random_keywords, browser_type, api_port, brain_type, phase, fixed_target_s, daily_seconds, pinned_theme), daemon=True).start()
 
-    def run_thread_pool(self, profiles, themes, max_workers, screen_w, screen_h, skip_youtube, skip_random_keywords, browser_type=BROWSER_GPM, api_port="", brain_type="none", phase="clean", fixed_target_s=0):
+    def run_thread_pool(self, profiles, themes, max_workers, screen_w, screen_h, skip_youtube, skip_random_keywords, browser_type=BROWSER_GPM, api_port="", brain_type="none", phase="clean", fixed_target_s=0, daily_seconds=0, pinned_theme=""):
         # v1.4.4: số slot = min(luồng, số profile) - khớp số tab đã tạo trong start_automation
         n_slots = min(max_workers, len(profiles))
         slots_queue = queue.Queue()
@@ -3426,9 +3510,16 @@ clearly tách nhóm hơn kiểu label trần + separator."""
         print(f"[System] Đang chạy với Browser: {browser_type.upper()} | Port API: {api_port or 'default'} | AI Brain: {brain_type} | Chế độ ngâm: {phase}")
         print("[System] Mục tiêu vòng: " + (f"CỐ ĐỊNH {_fmt_dur(fixed_target_s)}/vòng (bạn tự đặt)"
                                             if fixed_target_s else "NGẪU NHIÊN mỗi vòng (bot tự chọn, mỗi profile khác nhau)"))
-        
+        # v1.5.3: hạn mức NGÀY (khác mục tiêu vòng ở trên) - tổng thời gian ngâm của acc trong 1 ngày
+        print("[System] Hạn mức ngày: " + (f"{_fmt_dur(daily_seconds)}/acc/ngày (acc nào đã đủ thì bỏ qua, chưa đủ thì siết trần phiên theo phần còn lại)"
+                                           if daily_seconds else "TẮT (không giới hạn thời gian ngâm mỗi ngày)"))
+        if pinned_theme:
+            print(f"[System] Chủ đề GHIM: {pinned_theme} (bỏ qua danh sách chủ đề của phiên)")
+        else:
+            print("[System] Chủ đề: bot tự chọn 1 chủ đề trong danh sách cho mỗi profile")
+
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(worker_wrapper, self, pid, themes, slots_queue, screen_w, screen_h, skip_youtube, skip_random_keywords, browser_type, api_port, brain_type, phase, fixed_target_s) for pid in profiles]
+            futures = [executor.submit(worker_wrapper, self, pid, themes, slots_queue, screen_w, screen_h, skip_youtube, skip_random_keywords, browser_type, api_port, brain_type, phase, fixed_target_s, daily_seconds, pinned_theme) for pid in profiles]
             # v1.2.9: lỗi thoát khỏi worker từng làm f.result() ném lên đây -> toàn bộ
             # đoạn khôi phục UI bên dưới bị nhảy qua -> GUI kẹt "ĐANG CHẠY" vĩnh viễn.
             # Nay mọi exception của future chỉ in log, UI luôn được khôi phục (finally).
