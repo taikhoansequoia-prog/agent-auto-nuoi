@@ -642,17 +642,29 @@ class WarmupWorkflow:
             current_x = box['x'] + box['width'] / 2
             current_y = box['y'] + box['height'] / 2
             
-            # Rung nhẹ 2-4 nhịp, mỗi nhịp xê dịch vài pixel
+            # Rung nhẹ 2-4 nhịp, mỗi nhịp xê dịch vài pixel.
+            # v1.5.1: biên độ 10px -> 3px và rê DẦN từng bước nhỏ (không nhảy cóc).
+            # Trước đây mỗi nhịp là MỘT page.mouse.move() tức thì nhảy tới 14px chéo,
+            # trên thẻ <video> chiếm cả màn hình -> nhìn như con trỏ "giật cục cục".
             for _ in range(random.randint(2, 4)):
-                jitter_x = current_x + random.uniform(-10, 10)
-                jitter_y = current_y + random.uniform(-10, 10)
-                page.mouse.move(jitter_x, jitter_y)
-                
+                target_x = current_x + random.uniform(-3, 3)
+                target_y = current_y + random.uniform(-3, 3)
+                last_x = getattr(page.mouse, "_last_x", current_x) or current_x
+                last_y = getattr(page.mouse, "_last_y", current_y) or current_y
+
+                # Đi 3-5 bước nội suy giữa 2 điểm rung, mỗi bước 12-40ms
+                sub = random.randint(3, 5)
+                for s in range(1, sub + 1):
+                    ratio = s / sub
+                    page.mouse.move(last_x + (target_x - last_x) * ratio,
+                                    last_y + (target_y - last_y) * ratio)
+                    time.sleep(random.uniform(0.012, 0.04))
+
                 # CẬP NHẬT TỌA ĐỘ VÀO BỘ NHỚ LƯU TRỮ CHUỘT ẢO
-                page.mouse._last_x = jitter_x
-                page.mouse._last_y = jitter_y
-                
-                time.sleep(random.uniform(0.1, 0.4))
+                page.mouse._last_x = target_x
+                page.mouse._last_y = target_y
+
+                time.sleep(random.uniform(0.25, 0.7))
     
     def human_click(self, page, element):
         """Click chuẩn người thật: Tự động dùng Bezier xuất phát từ vị trí cũ -> Bấm -> Nhả"""
@@ -679,6 +691,31 @@ class WarmupWorkflow:
                 page.mouse.wheel(0, step_distance)
                 # Nghỉ vài chục mili-giây giữa mỗi khấc lăn, giống hệt ngón tay người
                 time.sleep(random.uniform(0.02, 0.08))
+
+    def _human_scroll(self, page, distance, settle=True):
+        """v1.5.1: cuộn KIỂU CỔ TAY người cho feed có scroll-snap (TikTok).
+
+        Vì sao không dùng smooth_scroll ở đây: smooth_scroll đi 8-15 khấc với nhịp
+        nghỉ 0.02-0.08s -> cả 1 viewport (~950-1100px) lướt xong trong 0.2-1.2s.
+        TikTok scroll-snap chưa kịp bám theo đã bị kéo tiếp, rồi "cập" vào ô video
+        -> mắt người thấy thành một cú GIẬT. Helper này vê CHẬM hơn hẳn và nhịp nghỉ
+        hình sin (dài ở đầu/cuối, ngắn ở giữa) giống hệt cú đẩy cổ tay thật, rồi
+        dừng 1 nhịp cho snap ổn định trước khi trả quyền điều khiển.
+        """
+        steps = random.randint(18, 30)
+        step_distance = distance / steps
+
+        for i in range(steps):
+            page.mouse.wheel(0, step_distance)
+            # 0.0 = vừa bắt đầu đẩy (chậm), 0.5 = giữa cú vuốt (nhanh nhất),
+            # 1.0 = sắp tới đích (khựng lại) -> không còn "vút một cái"
+            t = i / max(1, steps - 1)
+            ease = 0.35 + 0.65 * (abs(t - 0.5) * 2) ** 1.5
+            time.sleep(random.uniform(0.08, 0.18) * ease + 0.03)
+
+        if settle:
+            # Cho scroll-snap chạy xong + mắt người "đọc" xong khung hình mới
+            time.sleep(random.uniform(0.5, 1.1))
 
     def action_google_finance(self, page):
         """Hành động: Truy cập trực tiếp Google Finance tìm kiếm mã cổ phiếu, tiền ảo, vàng"""
@@ -1745,9 +1782,24 @@ class WarmupWorkflow:
             for v_index in range(num_videos):
                 print(f"\n      + [TikTok] Đang xem video thứ {v_index + 1}/{num_videos}...")
 
-                # 1. Ngồi xem video một khoảng thời lượng ngẫu nhiên (12-35s)
-                watch_time = random.uniform(12, 35)
-                print(f"      + Đang xem trong {watch_time:.0f}s...")
+                # 1. Ngồi xem video một khoảng thời lượng NGẪU NHIÊN kiểu người.
+                #    v1.5.1: bản cũ `uniform(12, 35)` là phân phối ĐỀU nên mọi video
+                #    đều rơi vào giữa dải — E2E 20/10 đo được 27/27/32/24/20/21s:
+                #    không video nào "liếc rồi quẹt", cũng không video nào "xem lâu"
+                #    -> trông như đồng hồ hẹn giờ chứ không phải người thật.
+                #    Giờ pha 3 hành vi theo xác suất cộng dồn 1.0:
+                #      ~45% liếc nhanh 4-12s, ~38% xem vừa 15-35s, ~17% xem lâu 45-90s.
+                roll = random.random()
+                if roll < 0.45:
+                    watch_time = int(random.uniform(4, 12))
+                    mood = "liếc nhanh"
+                elif roll < 0.83:
+                    watch_time = int(random.uniform(15, 35))
+                    mood = "xem vừa"
+                else:
+                    watch_time = int(random.uniform(45, 90))
+                    mood = "xem lâu (hứng thú)"
+                print(f"      + Đang xem trong {watch_time}s ({mood})...")
                 watched = 0
                 while watched < watch_time:
                     # v1.4.6: chunk bị chặn bởi thời gian còn lại — log không còn
@@ -1756,7 +1808,8 @@ class WarmupWorkflow:
                     time.sleep(chunk)
                     watched += chunk
                     # v1.4.3: in nhịp tim để người xem không thấy log "đứng im" im lặng
-                    print(f"         ...đang xem video {v_index + 1}/{num_videos} ({watched:.0f}/{watch_time:.0f}s)")
+                    # v1.5.1: min() để dòng cuối không in "(13/12s)" khi chunk cán đích
+                    print(f"         ...đang xem video {v_index + 1}/{num_videos} ({min(watched, watch_time):.0f}/{watch_time:.0f}s)")
                     # Thỉnh thoảng di chuột nhẹ để trông tự nhiên (không click gì)
                     if random.random() < 0.3:
                         self.move_mouse_viewport_center(page)
@@ -1791,12 +1844,17 @@ class WarmupWorkflow:
                             self.move_mouse_viewport_center(page)
                     if random.random() < 0.4:
                         print("      + Quẹt nhẹ xem trước video kế rồi kéo về...")
-                        self.smooth_scroll(page, int(vh * random.uniform(0.4, 0.7)))
+                        # v1.5.1: đổi sang _human_scroll (cùng nhịpEase với cú chuyển
+                        # video). Chiều giữ nguyên như cũ: xuống 0.4-0.7 viewport rồi
+                        # kéo NGƯỢC lại 100-300px = đúng nghĩa "xem trước rồi kéo về".
+                        self._human_scroll(page, int(vh * random.uniform(0.4, 0.7)))
                         self.random_sleep(1, 2)
-                        self.smooth_scroll(page, -random.randint(100, 300))
+                        self._human_scroll(page, -random.randint(100, 300))
                         self.random_sleep(0.8, 1.5)
                     print("      + Cuộn sang video tiếp theo...")
-                    self.smooth_scroll(page, vh + random.randint(50, 200))
+                    # v1.5.1: CẢ viewport mà smooth_scroll vê xong trong 0.2-1.2s là
+                    # nguyên nhân chính TikTok snap "cập" cái GIẬT -> _human_scroll
+                    self._human_scroll(page, vh + random.randint(50, 200))
                     self.random_sleep(2, 4)
 
             print(f"  -> [Action] HOÀN TẤT PHIÊN TIKTOK! (Đã xem xong {num_videos} video).")
