@@ -29,6 +29,7 @@ KNOWN_KEYS = [
     ("OPENAI_API_KEY", "OpenAI (brain openai)"),
     ("QWEN_API_KEY", "Qwen DashScope (brain qwen-max / qwen-flash)"),
     ("DASHSCOPE_API_KEY", "Qwen - alias cũ (nếu QWEN_API_KEY trống)"),
+    ("TELEGRAM_BOT_TOKEN", "Bot Telegram đổi mật khẩu từ xa (v1.5.4)"),
 ]
 
 _PBKDF2_ROUNDS = 200_000

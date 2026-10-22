@@ -42,6 +42,9 @@ DEFAULTS = {
     # rỗng = chưa đổi -> tiện ích nhận mật khẩu khởi điểm api_vault.DEFAULT_PASSWORD)
     "api_gate_salt": "",
     "api_gate_hash": "",
+    # v1.5.4: bot Telegram đổi mật khẩu cổng API từ xa (token nằm trong .env, KHÔNG lưu ở đây)
+    "telegram_enabled": False,
+    "telegram_chat_id": "",
 }
 
 

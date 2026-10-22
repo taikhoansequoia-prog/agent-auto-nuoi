@@ -46,6 +46,7 @@ from src.logger import append_line, LOG_DIR
 from src.version import get_version_line
 from src.app_config import load_config, save_config
 from src import api_vault
+from src import telegram_bot
 
 # ==========================================
 # SPRINT 1.5: nhãn phase "ngôn ngữ người vận hành" -> key nội bộ (warmup.py GIỮ NGUYÊN)
@@ -993,6 +994,10 @@ class AutomationApp:
         self.btn_stage = ttk.Button(card_ctl, text="GIAI ĐOẠN NGÂM (S0 → S5)",
                                     command=self.show_stage_board, style="Tool.TButton")
         self.btn_stage.grid(row=9, column=0, columnspan=3, sticky="we", pady=(6, 0))
+        # v1.5.4: đổi mật khẩu cổng API từ xa qua bot Telegram (chat_id cố định)
+        self.btn_telegram = ttk.Button(card_ctl, text="TELEGRAM (ĐỔI MẬT KHẨU TỪ XA)",
+                                       command=self.open_telegram_manager, style="Tool.TButton")
+        self.btn_telegram.grid(row=10, column=0, columnspan=3, sticky="we", pady=(6, 0))
 
         # ---------- Thẻ ngang dưới: hạt giống chủ đề (v1.5.2: không còn là cặp điều khiển phiên) ----------
         card_kw = ttk.Labelframe(outer, text="  CHỦ ĐỀ XUYÊN SUỐT — HẠT GIỐNG CHO AI BRAIN  ", padding=(12, 8))
@@ -2551,6 +2556,9 @@ clearly tách nhóm hơn kiểu label trần + separator."""
         except (ValueError, TypeError):
             cfg["daily_minutes"] = 30
         cfg["pinned_theme"] = self._pinned_theme_text()  # v1.5.3: nhớ chủ đề ghim
+        # v1.5.4: nhớ trạng thái bot Telegram (token nằm trong .env, KHÔNG lưu ở đây)
+        cfg["telegram_enabled"] = bool(self.cfg.get("telegram_enabled", False))
+        cfg["telegram_chat_id"] = str(self.cfg.get("telegram_chat_id", "") or "")
         self.cfg = cfg
         save_config(cfg)
 
@@ -2559,6 +2567,7 @@ clearly tách nhóm hơn kiểu label trần + separator."""
             self.save_current_config()
         except Exception:
             pass
+        self._tg_stop_quiet()  # v1.5.4: tắt thread bot Telegram trước khi thoát
         self.root.destroy()
 
     def _on_browser_type_changed(self, event=None):
@@ -3459,7 +3468,7 @@ clearly tách nhóm hơn kiểu label trần + separator."""
                     self.btn_refresh_profiles, self.btn_add_manual,
                     self.btn_dashboard, self.btn_export_csv, self.btn_timeline,
                     self.btn_phase_info, self.btn_cycle_time, self.btn_api_keys,
-                    self.btn_stage):
+                    self.btn_stage, self.btn_telegram):
             btn.config(state="disabled")
         
         for tab_name in list(self.log_boxes.keys()):
@@ -3556,6 +3565,267 @@ clearly tách nhóm hơn kiểu label trần + separator."""
                 pass
             self._api_dialog = None
         self._ask_api_password(self._open_api_key_dialog)
+
+    # ------------------------------------------------------------------ v1.5.4: TELEGRAM BOT
+    def open_telegram_manager(self):
+        """Cửa sổ cấu hình bot Telegram (đổi mật khẩu cổng API từ xa).
+
+        Không có cổng mật khẩu: cửa sổ này chỉ hiện token đã che + Chat ID, còn việc
+        đổi mật khẩu thật thì xảy ra trên Telegram và do bot tự kiểm tra quyền.
+        """
+        if getattr(self, "_tg_dialog", None) is not None:
+            try:
+                if self._tg_dialog.winfo_exists():
+                    self._tg_dialog.lift()
+                    return
+            except Exception:
+                pass
+            self._tg_dialog = None
+        try:
+            self._open_telegram_dialog()
+        except Exception as e:
+            self._tg_dialog = None
+            print(f"[!] Không mở được cửa sổ Telegram: {e}")
+
+    def _tg_log(self, msg):
+        """Cầu nối thread bot -> ô log MAIN (append_log tự marshal về main thread)."""
+        try:
+            self.append_log("MAIN", str(msg))
+        except Exception:
+            pass
+
+    def _tg_stop_quiet(self):
+        """Tắt bot nếu đang chạy (nuốt mọi lỗi — dùng ở _on_close)."""
+        bot = getattr(self, "_tg_bot", None)
+        if bot is None:
+            return
+        try:
+            bot.stop()
+        except Exception:
+            pass
+
+    def _open_telegram_dialog(self):
+        """Dialog cấu hình bot Telegram — phi modal (grab sẽ khóa remap theme)."""
+        win = tk.Toplevel(self.root)
+        self._tg_dialog = win
+        win.title("Bot Telegram — đổi mật khẩu cổng API từ xa")
+        win.configure(bg=self.C_CARD)
+        win.resizable(False, False)
+        win.transient(self.root)
+        win.protocol("WM_DELETE_WINDOW",
+                     lambda: (setattr(self, "_tg_dialog", None), win.destroy()))
+
+        box = tk.Frame(win, bg=self.C_CARD, padx=16, pady=14)
+        box.pack(fill="both", expand=True)
+
+        tk.Label(box, text="Telegram Bot", bg=self.C_CARD, fg=self.C_ACCENT,
+                 font=("Segoe UI", 11, "bold")).pack(anchor="w")
+        tk.Label(
+            box,
+            text=("Bật bot để đổi mật khẩu cổng API từ xa bằng điện thoại.\n"
+                  "1) Tạo bot với @BotFather, lấy TOKEN dán vào ô dưới.\n"
+                  "2) Nhắn 1 câu bất kỳ cho bot rồi bấm \"Lấy Chat ID\".\n"
+                  "Chỉ ĐÚNG Chat ID này điều khiển được — người khác nhắn sẽ bị bỏ qua."),
+            bg=self.C_CARD, fg=self.C_MUTED, justify="left",
+            font=("Segoe UI", 9), wraplength=540).pack(anchor="w", pady=(2, 10))
+
+        row1 = tk.Frame(box, bg=self.C_CARD)
+        row1.pack(fill="x", pady=3)
+        tk.Label(row1, text="Bot token:", width=12, anchor="w", bg=self.C_CARD,
+                 fg=self.C_FG, font=("Segoe UI", 9)).pack(side="left")
+        var_token = tk.StringVar(value=api_vault.get_key("TELEGRAM_BOT_TOKEN"))
+        ent_token = tk.Entry(row1, textvariable=var_token, show="•", width=46,
+                             bg=self.C_FIELD, fg=self.C_FG, insertbackground=self.C_FG,
+                             relief="flat", font=("Consolas", 9))
+        ent_token.pack(side="left", ipady=3)
+        eye_state = {"on": False}
+        btn_eye = tk.Button(row1, text="Hiện", width=5, bg=self.C_FIELD, fg=self.C_FG,
+                            relief="flat", activebackground=self.C_CARD2,
+                            activeforeground=self.C_FG)
+
+        def _toggle_eye(ent=ent_token, btn=btn_eye):
+            eye_state["on"] = not eye_state["on"]
+            ent.config(show="" if eye_state["on"] else "•")
+            btn.config(text="Ẩn" if eye_state["on"] else "Hiện")
+
+        btn_eye.config(command=_toggle_eye)
+        btn_eye.pack(side="left", padx=(6, 0))
+
+        row2 = tk.Frame(box, bg=self.C_CARD)
+        row2.pack(fill="x", pady=3)
+        tk.Label(row2, text="Chat ID:", width=12, anchor="w", bg=self.C_CARD,
+                 fg=self.C_FG, font=("Segoe UI", 9)).pack(side="left")
+        var_chat = tk.StringVar(value=str(self.cfg.get("telegram_chat_id", "") or ""))
+        ent_chat = tk.Entry(row2, textvariable=var_chat, width=46,
+                            bg=self.C_FIELD, fg=self.C_FG, insertbackground=self.C_FG,
+                            relief="flat", font=("Consolas", 9))
+        ent_chat.pack(side="left", ipady=3)
+
+        lbl_state = tk.Label(box, text="", bg=self.C_CARD2, fg=self.C_FG, justify="left",
+                             anchor="w", font=("Consolas", 9), padx=10, pady=8,
+                             wraplength=540)
+        lbl_state.pack(fill="x", pady=(10, 0))
+
+        tk.Label(box, text=telegram_bot.CMD_HELP, bg=self.C_CARD, fg=self.C_MUTED,
+                 justify="left", anchor="w", font=("Consolas", 8),
+                 wraplength=540).pack(fill="x", pady=(8, 0))
+
+        def _render_status():
+            bot = getattr(self, "_tg_bot", None)
+            if bot is None:
+                if not api_vault.get_key("TELEGRAM_BOT_TOKEN"):
+                    txt = "Chưa có bot token trong .env — dán token rồi bấm BẬT BOT."
+                elif self.cfg.get("telegram_enabled"):
+                    txt = ("Đã bật ở phiên trước nhưng chưa chạy phiên này.\n"
+                           "Bấm BẬT BOT để bot trả lời Telegram trở lại.")
+                else:
+                    txt = "Bot chưa bật trong phiên này."
+            else:
+                try:
+                    txt = bot.status_text()
+                except Exception as e:
+                    txt = f"Không đọc được trạng thái bot: {e}"
+            try:
+                lbl_state.config(text=txt)
+            except Exception:
+                pass
+
+        def _tick():
+            try:
+                if not win.winfo_exists():
+                    return
+            except Exception:
+                return
+            _render_status()
+            try:
+                win.after(2000, _tick)
+            except Exception:
+                pass
+
+        def _persist(chat=None, enabled=None):
+            if chat is not None:
+                self.cfg["telegram_chat_id"] = chat
+            if enabled is not None:
+                self.cfg["telegram_enabled"] = bool(enabled)
+            try:
+                save_config(self.cfg)
+            except Exception as e:
+                print(f"[!] Không lưu được cấu hình Telegram: {e}")
+
+        def _save(silent=False):
+            tok = var_token.get().strip()
+            chat = var_chat.get().strip()
+            ok = True
+            if tok and not api_vault.set_key("TELEGRAM_BOT_TOKEN", tok):
+                ok = False
+            _persist(chat=chat)
+            if not silent:
+                if ok:
+                    self._tg_log("[Telegram] Đã lưu token vào .env và Chat ID vào cấu hình.")
+                else:
+                    self._tg_log("[!] Lưu cấu hình Telegram thất bại — xem log.")
+            return ok
+
+        def _peek_chat():
+            tok = var_token.get().strip()
+            if not tok:
+                messagebox.showwarning("Thiếu token", "Dán bot token trước đã.", parent=win)
+                return
+            if not api_vault.set_key("TELEGRAM_BOT_TOKEN", tok):
+                messagebox.showerror("Lỗi", "Không ghi được token vào .env — xem log.",
+                                     parent=win)
+                return
+            try:
+                resp = requests.get(
+                    f"https://api.telegram.org/bot{tok}/getUpdates",
+                    params={"timeout": 0, "limit": 50}, timeout=10)
+                data = resp.json()
+            except Exception as e:
+                messagebox.showerror("Lỗi mạng",
+                                     f"Không gọi được Telegram API:\n{e}", parent=win)
+                return
+            if not data.get("ok"):
+                messagebox.showerror(
+                    "Telegram báo lỗi",
+                    str(data.get("description") or "token không hợp lệ"), parent=win)
+                return
+            found = []
+            for upd in data.get("result") or []:
+                msg = upd.get("message") or upd.get("edited_message") or {}
+                chat = msg.get("chat") or {}
+                cid = chat.get("id")
+                if cid is None:
+                    continue
+                label = str(chat.get("username") or chat.get("first_name")
+                            or chat.get("title") or "?")
+                item = (str(cid), label)
+                if item not in found:
+                    found.append(item)
+            if not found:
+                messagebox.showinfo(
+                    "Chưa thấy ai nhắn",
+                    "Bot chưa nhận được tin nhắn nào.\n"
+                    "Mở Telegram, nhắn 1 câu bất kỳ cho bot rồi bấm lại.",
+                    parent=win)
+                return
+            best = found[-1]
+            var_chat.set(best[0])
+            _persist(chat=best[0])
+            self._tg_log(f"[Telegram] Đã lấy Chat ID {best[0]} ({best[1]}).")
+            if len(found) > 1:
+                others = ", ".join(f"{c} ({n})" for c, n in found[:-1])
+                messagebox.showinfo(
+                    "Nhiều người đã nhắn bot",
+                    f"Đã chọn Chat ID mới nhất: {best[0]} ({best[1]}).\n"
+                    f"Bỏ qua: {others}", parent=win)
+            _render_status()
+
+        def _do_start():
+            tok = var_token.get().strip()
+            chat = var_chat.get().strip()
+            if not tok or not chat:
+                messagebox.showwarning("Thiếu cấu hình",
+                                       "Cần cả bot token và Chat ID.", parent=win)
+                return
+            if not api_vault.set_key("TELEGRAM_BOT_TOKEN", tok):
+                messagebox.showerror("Lỗi", "Không ghi được token vào .env — xem log.",
+                                     parent=win)
+                return
+            self._tg_stop_quiet()
+            bot = telegram_bot.TelegramPasswordBot(
+                token=tok, chat_id=chat, log=self._tg_log)
+            self._tg_bot = bot
+            started = False
+            try:
+                started = bool(bot.start())
+            except Exception as e:
+                self._tg_log(f"[!] Không bật được bot: {e}")
+            _persist(chat=chat, enabled=started)
+            _render_status()
+
+        def _do_stop():
+            self._tg_stop_quiet()
+            _persist(enabled=False)
+            _render_status()
+
+        bar = tk.Frame(box, bg=self.C_CARD)
+        bar.pack(fill="x", pady=(10, 0))
+        ttk.Button(bar, text="Lưu", command=_save,
+                   style="Tool.TButton", width=8).pack(side="left")
+        ttk.Button(bar, text="Lấy Chat ID", command=_peek_chat,
+                   style="Tool.TButton", width=12).pack(side="left", padx=(6, 0))
+        ttk.Button(bar, text="BẬT BOT", command=_do_start,
+                   style="Start.TButton", width=10).pack(side="left", padx=(16, 0))
+        ttk.Button(bar, text="TẮT BOT", command=_do_stop,
+                   style="Stop.TButton", width=10).pack(side="left", padx=(6, 0))
+        ttk.Button(bar, text="Đóng", command=win.destroy,
+                   style="Tool.TButton", width=8).pack(side="right")
+
+        ent_token.bind("<Return>", lambda _e: _save())
+        ent_chat.bind("<Return>", lambda _e: _save())
+        win.bind("<Escape>", lambda _e: win.destroy())
+        ent_token.focus_set()
+        _tick()
 
     def _ask_api_password(self, on_ok, change_mode=False):
         """Dialog mật khẩu phi modal (modal thật sẽ khóa remap theme).
@@ -3859,7 +4129,7 @@ clearly tách nhóm hơn kiểu label trần + separator."""
                     self.btn_refresh_profiles, self.btn_add_manual,
                     self.btn_dashboard, self.btn_export_csv, self.btn_timeline,
                     self.btn_phase_info, self.btn_cycle_time, self.btn_api_keys,
-                    self.btn_stage):
+                    self.btn_stage, self.btn_telegram):
             btn.config(state=state)
 
     def _apply_log_filter(self):
