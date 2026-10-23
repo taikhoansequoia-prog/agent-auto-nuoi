@@ -20,7 +20,8 @@ class BrainManager:
                 raise ValueError(
                     "Thiếu GEMINI_API_KEY. Hãy khai báo trong file .env (xem .env.example)."
                 )
-            return GeminiBrain(api_key=api_key)
+            # v1.5.6: GEMINI_API_KEY_ENDPOINT trống -> cổng chính; có -> cổng tự đặt.
+            return GeminiBrain(api_key=api_key, endpoint=os.getenv("GEMINI_API_KEY_ENDPOINT") or None)
 
         elif brain_type == "local":
             from .local_brain import LocalBrain
@@ -33,7 +34,9 @@ class BrainManager:
                 raise ValueError(
                     "Thiếu OPENAI_API_KEY. Hãy khai báo trong file .env (xem .env.example)."
                 )
-            return OpenAIBrain(api_key=api_key, model_name="gpt-5-mini")
+            # v1.5.6: OPENAI_API_KEY_ENDPOINT trống -> cổng chính của SDK; có -> ghi đè.
+            return OpenAIBrain(api_key=api_key, model_name="gpt-5-mini",
+                               base_url=os.getenv("OPENAI_API_KEY_ENDPOINT") or None)
 
         elif brain_type in ("qwen-max", "qwen-flash"):
             from .openai_brain import GenericLLMBrain
@@ -43,10 +46,11 @@ class BrainManager:
                     "Thiếu QWEN_API_KEY. Hãy khai báo trong file .env."
                 )
             model = "qwen-max" if brain_type == "qwen-max" else "qwen-plus"
+            # v1.5.6: QWEN_API_KEY_ENDPOINT trống -> cổng DashScope chính; có -> ghi đè.
             return GenericLLMBrain(
                 api_key=api_key,
                 model_name=model,
-                base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"
+                base_url=os.getenv("QWEN_API_KEY_ENDPOINT") or "https://dashscope.aliyuncs.com/compatible-mode/v1"
             )
 
         else:

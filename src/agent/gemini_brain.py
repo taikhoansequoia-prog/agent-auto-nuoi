@@ -3,8 +3,19 @@ import json
 from .base_brain import BaseBrain
 
 class GeminiBrain(BaseBrain):
-    def __init__(self, api_key: str, model_name="gemini-1.5-flash"):
-        genai.configure(api_key=api_key)
+    def __init__(self, api_key: str, model_name="gemini-1.5-flash", endpoint=None):
+        # v1.5.6: endpoint trống -> cổng chính của SDK; có endpoint -> ghi đè (proxy/gateway riêng).
+        endpoint = (endpoint or "").strip()
+        if endpoint:
+            try:
+                genai.configure(api_key=api_key, api_endpoint=endpoint)
+                print(f"[*] Gemini dùng cổng tự đặt: {endpoint}")
+            except TypeError:
+                # SDK cũ không nhận api_endpoint -> quay về configure thường (không sập brain).
+                genai.configure(api_key=api_key)
+                print("[!] SDK Gemini không hỗ trợ api_endpoint - dùng cổng chính.")
+        else:
+            genai.configure(api_key=api_key)
         self.model = genai.GenerativeModel(model_name)
 
     def ask_text(self, prompt: str) -> str:

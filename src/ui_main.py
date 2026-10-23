@@ -3735,9 +3735,10 @@ clearly tách nhóm hơn kiểu label trần + separator."""
                 messagebox.showerror("Lỗi", "Không ghi được token vào .env — xem log.",
                                      parent=win)
                 return
+            base = (api_vault.get_key("TELEGRAM_API_BASE") or "https://api.telegram.org").rstrip("/")
             try:
                 resp = requests.get(
-                    f"https://api.telegram.org/bot{tok}/getUpdates",
+                    f"{base}/bot{tok}/getUpdates",
                     params={"timeout": 0, "limit": 50}, timeout=10)
                 data = resp.json()
             except Exception as e:
@@ -3793,7 +3794,8 @@ clearly tách nhóm hơn kiểu label trần + separator."""
                 return
             self._tg_stop_quiet()
             bot = telegram_bot.TelegramPasswordBot(
-                token=tok, chat_id=chat, log=self._tg_log)
+                token=tok, chat_id=chat, log=self._tg_log,
+                api_base=api_vault.get_key("TELEGRAM_API_BASE") or None)
             self._tg_bot = bot
             started = False
             try:
@@ -3974,10 +3976,14 @@ clearly tách nhóm hơn kiểu label trần + separator."""
                 return
             env_map = dict(env_pairs)
             known_names = {k for k, _d in api_vault.KNOWN_KEYS}
+            # v1.5.6: biến phụ "_ENDPOINT" KHÔNG thành dòng riêng — nó là cổng
+            # đi kèm của key cha, hiển thị như một dòng chữ mờ dưới tên key cha.
             ordered = list(api_vault.KNOWN_KEYS)
-            ordered += [(k, "") for k, _v in env_pairs if k not in known_names]
+            ordered += [(k, "") for k, _v in env_pairs
+                        if k not in known_names and not api_vault.is_endpoint_key(k)]
             for name, desc in ordered:
                 val = env_map.get(name, "")
+                endpoint = api_vault.get_endpoint(name)
                 fr = tk.Frame(rows_fr, bg=self.C_CARD if name in known_names else self.C_CARD2)
                 fr.pack(fill="x", pady=2, padx=2)
                 lbl_fr = tk.Frame(fr, bg=fr["bg"])
@@ -3987,6 +3993,11 @@ clearly tách nhóm hơn kiểu label trần + separator."""
                 if desc:
                     tk.Label(lbl_fr, text=desc, bg=fr["bg"], fg=self.C_MUTED,
                              font=("Segoe UI", 8, "italic")).pack(anchor="w")
+                # v1.5.6: cổng đang dùng — trống = cổng chính, có = cổng tự đặt.
+                tk.Label(lbl_fr,
+                         text=("Cổng: " + endpoint) if endpoint else "Cổng: chính (mặc định)",
+                         bg=fr["bg"], fg=(self.C_ACCENT_2 if endpoint else self.C_MUTED),
+                         font=("Consolas", 8)).pack(anchor="w")
                 shown = val if revealed.get(name) else (api_vault.mask(val) if val else "(trống)")
                 val_lbl = tk.Label(fr, text=shown, bg=fr["bg"], fg=self.C_FG,
                                    font=("Consolas", 9), width=26, anchor="e")
@@ -4015,7 +4026,8 @@ clearly tách nhóm hơn kiểu label trần + separator."""
                                                parent=win):
                         return
                     if api_vault.delete_key(name):
-                        print(f"[+] Đã xóa {name} khỏi .env.")
+                        api_vault.delete_endpoint(name)
+                        print(f"[+] Đã xóa {name} (kèm endpoint nếu có) khỏi .env.")
                         _refresh()
                     else:
                         messagebox.showerror("Lỗi", "Không xóa được — xem log để biết lý do.", parent=win)
@@ -4092,6 +4104,15 @@ clearly tách nhóm hơn kiểu label trần + separator."""
             tk.Label(box, text="(Đang che — tick \"Hiện giá trị\" để sửa trực tiếp)",
                      bg=self.C_CARD, fg=self.C_MUTED, font=("Segoe UI", 8, "italic")).pack(anchor="w")
 
+        # v1.5.6: endpoint đi kèm — trống = cổng chính, điền = ghi đè.
+        tk.Label(box, text=f"Endpoint của {name or 'key'} (để trống = cổng chính)",
+                 bg=self.C_CARD, fg=self.C_FG, font=("Segoe UI", 9)).pack(anchor="w", pady=(10, 0))
+        ep_var = tk.StringVar(value=api_vault.get_endpoint(name) if name else "")
+        ep_en = ttk.Entry(box, textvariable=ep_var, width=46, font=("Consolas", 10))
+        ep_en.pack(fill="x", pady=(2, 0))
+        tk.Label(box, text="VD: https://dashscope.aliyuncs.com/compatible-mode/v1 · trống là về cổng mặc định.",
+                 bg=self.C_CARD, fg=self.C_MUTED, font=("Segoe UI", 8, "italic")).pack(anchor="w")
+
         err = tk.Label(box, text="", bg=self.C_CARD, fg=self.C_ERR_FG, anchor="w",
                        wraplength=340, justify="left")
         err.pack(fill="x", pady=(6, 0))
@@ -4110,6 +4131,12 @@ clearly tách nhóm hơn kiểu label trần + separator."""
                                            f"{key_name} đã có trong .env. Ghi đè key mới?", parent=win):
                     return
             if api_vault.set_key(key_name, value):
+                ep = ep_var.get().strip()
+                if ep:
+                    api_vault.set_key(api_vault.endpoint_name(key_name), ep)
+                    print(f"[+] Cổng tự đặt cho {key_name}: {ep}")
+                else:
+                    api_vault.delete_endpoint(key_name)
                 print(f"[+] Đã lưu {key_name} vào .env + os.environ.")
                 win.destroy()
                 on_saved()

@@ -48,6 +48,22 @@ def env_path():
         return os.path.join(os.getcwd(), ".env")
 
 
+# ---------------------------------------------------------------- endpoint đi kèm key
+def endpoint_name(name):
+    """Tên biến môi trường 'đi kèm' chứa endpoint của một key (v1.5.6).
+
+    Quy ước: GEMINI_API_KEY -> GEMINI_API_KEY_ENDPOINT.
+    Có biến này (không rỗng) -> mọi chỗ dùng key gọi theo cổng tự đặt;
+    bỏ trống -> giữ nguyên cổng chính mặc định của thư viện / hardcoded.
+    """
+    return f"{(name or '').strip().upper()}_ENDPOINT"
+
+
+def is_endpoint_key(name):
+    """True nếu tên key là biến endpoint đi kèm (không hiển thị thành dòng riêng)."""
+    return (name or "").strip().upper().endswith("_ENDPOINT")
+
+
 # ---------------------------------------------------------------- đọc/ghi .env
 def _read_text(path):
     try:
@@ -117,6 +133,11 @@ def get_key(name, path=None):
     return os.environ.get(name, "")
 
 
+def get_endpoint(name, path=None):
+    """Endpoint tự đặt của một key ('' = dùng cổng chính mặc định). v1.5.6."""
+    return (get_key(endpoint_name(name), path) or "").strip()
+
+
 def set_key(name, value, path=None):
     """Cập nhật (hoặc thêm mới) KEY=value vào .env, đồng bộ os.environ. -> True/False."""
     name = (name or "").strip()
@@ -169,6 +190,11 @@ def delete_key(name, path=None):
     return True
 
 
+def delete_endpoint(name, path=None):
+    """Gỡ endpoint tự đặt của một key -> acc/brain quay về cổng chính. v1.5.6."""
+    return delete_key(endpoint_name(name), path)
+
+
 def sync_env_into_process(path=None):
     """Nạp mọi key trong .env vào os.environ (gọi lúc mở app để EXE/source đều như nhau)."""
     n = 0
@@ -177,6 +203,12 @@ def sync_env_into_process(path=None):
             os.environ[k] = v
             n += 1
     return n
+
+
+def known_keys_with_endpoints():
+    """[(tên key, mô tả, tên biến endpoint của nó)] — để UI khỏi liệt kê biến
+    endpoint như một key độc lập. v1.5.6."""
+    return [(k, d, endpoint_name(k)) for k, d in KNOWN_KEYS]
 
 
 def mask(value):
