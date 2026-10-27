@@ -671,8 +671,8 @@ check("brain_manager không còn hardcode DashScope mà không đọc env",
       bm.count("dashscope.aliyuncs.com/compatible-mode/v1") == 1)
 
 gb = src_of("src/agent/gemini_brain.py")
-check("gemini_brain nhận endpoint=None",
-      "def __init__(self, api_key: str, model_name=\"gemini-1.5-flash\", endpoint=None):" in gb)
+check("gemini_brain nhận endpoint=None (model cập nhật gemini-flash-latest v1.5.9)",
+      "def __init__(self, api_key: str, model_name=\"gemini-flash-latest\", endpoint=None):" in gb)
 check("gemini_brain thử api_endpoint", "api_endpoint=endpoint" in gb)
 check("gemini_brain có fallback TypeError", "except TypeError:" in gb)
 

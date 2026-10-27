@@ -356,17 +356,17 @@ check("test_v152 vẫn assert đúng dòng đó", V152_DEADLINE in v152_src or "
 check("ui: total_actions vẫn random 4..8 (test_v152 assert)", "total_actions = random.randint(4, 8)" in ui_src)
 
 # Luồng tham số 15 vị trí: Thread -> run_thread_pool -> executor.submit -> worker_wrapper -> run_single_profile
-check("ui: Thread args kết thúc bằng 'fixed_target_s, daily_seconds, pinned_theme'",
-      "fixed_target_s, daily_seconds, pinned_theme), daemon=True)" in ui_src)
-check("ui: executor.submit truyền đủ 3 tham số cuối",
-      "fixed_target_s, daily_seconds, pinned_theme) for pid in profiles]" in ui_src)
+check("ui: Thread args kết thúc bằng '...pinned_theme, kw_lang' (v1.6.1 +ngôn ngữ)",
+      "fixed_target_s, daily_seconds, pinned_theme, kw_lang), daemon=True)" in ui_src)
+check("ui: executor.submit truyền đủ tham số cuối (+keyword_lang v1.6.1)",
+      "fixed_target_s, daily_seconds, pinned_theme, keyword_lang) for pid in profiles]" in ui_src)
 check("ui: run_single_profile nhận 2 param mới có default 0/''",
       'daily_seconds=0, pinned_theme=""' in ui_src)
 check("ui: worker_wrapper nhận 2 param mới có default 0/''",
       ui_src.count('daily_seconds=0, pinned_theme=""') >= 3,
       str(ui_src.count('daily_seconds=0, pinned_theme=""')))
-check("ui: run_thread_pool nhận 2 param mới", "def run_thread_pool(" in ui_src and
-      "daily_seconds=0, pinned_theme=\"\")" in ui_src)
+check("ui: run_thread_pool nhận param mới (+keyword_lang v1.6.1)", "def run_thread_pool(" in ui_src and
+      "daily_seconds=0, pinned_theme=\"\", keyword_lang=\"en\"):" in ui_src)
 
 check("app_config: DEFAULTS có daily_minutes", '"daily_minutes": 30' in cfg_src)
 check("app_config: DEFAULTS có pinned_theme", '"pinned_theme": ""' in cfg_src)

@@ -46,6 +46,7 @@ from src.logger import append_line, LOG_DIR
 from src.version import get_version_line
 from src.app_config import load_config, save_config
 from src import api_vault
+from src import lang_profiles
 from src import telegram_bot
 
 # ==========================================
@@ -178,6 +179,11 @@ SLOT_CYCLE_START = {}
 # v1.4.0: "Slot N" -> dict số liệu chu trình đang chạy (run_single_profile ghi, worker_wrapper đọc)
 # {start_str, status('ok'|'error'|'stopped'|'pending'), duration_s, finish_str, actions, phase, error}
 SLOT_CYCLE_INFO = {}
+# v1.6.5: GIÃN THỜI ĐIỂM KHỞI ĐỘNG giữa các luồng — các profile của wave đầu KHÔNG cùng
+# bắt đầu một lúc. Chỉ stagger lần đầu mỗi slot (wave 1); wave sau tự lệch pha (profile
+# trước xong mới tới lượt). Set này được clear mỗi phiên mới trong start_automation.
+_STAGGER_LOCK = threading.Lock()
+_STAGGERED_SLOTS = set()
 
 
 def _fmt_dur(v):
@@ -331,24 +337,23 @@ def assign_topics_for_run(profile_ids, themes):
     return assignment_map, rows
 
 # v1.5.7: mẫu offline BÙ khi không có AI hoặc AI trả thiếu (vẫn giữ random thật qua rng).
-_TOPIC_TEMPLATES = (
-    "{s}", "{s} mới nhất", "tin tức {s}", "{s} hôm nay", "phân tích {s}",
-    "{s} là gì", "hướng dẫn {s}", "{s} cho người mới", "xu hướng {s}",
-    "{s} 2026", "review {s}", "{s} chi tiết", "kinh nghiệm {s}",
-    "so sánh {s}", "cập nhật {s}", "{s} nổi bật",
-)
+# v1.6.1: mẫu offline theo NGÔN NGỮ (vi/en/ja/ko) nằm trong src/lang_profiles.py.
+# Giữ alias _TOPIC_TEMPLATES = bộ tiếng Anh cho tương thích ngược.
+_TOPIC_TEMPLATES = lang_profiles.TOPIC_TEMPLATES["en"]
 
 
-def _local_topic_variants(seed, n, rng=None):
+def _local_topic_variants(seed, n, rng=None, lang="en"):
     """Sinh n biến thể chủ đề quanh `seed` HOÀN TOÀN offline (seed + mẫu + RNG).
 
     Luôn trả về đúng n chuỗi PHÂN BIỆT. Dùng khi brain=None hoặc để BÙ cho phần AI
     trả thiếu. rng=None -> dùng random global. seed rỗng -> chủ đề mặc định.
+    v1.6.1: mẫu theo `lang` (vi/en/ja/ko).
     """
     rng = rng or random
-    base = (seed or "chủ đề thời sự").strip() or "chủ đề thời sự"
+    templates = lang_profiles.topic_templates(lang)
+    base = (seed or "").strip() or lang_profiles.default_seed(lang)
     seen, uniq = set(), []
-    for t in _TOPIC_TEMPLATES:
+    for t in templates:
         cand = t.format(s=base).strip()
         k = cand.lower()
         if cand and k not in seen:
@@ -370,7 +375,25 @@ def _local_topic_variants(seed, n, rng=None):
     return out[:n]
 
 
-def generate_topics_from_seed(seed, n, brain=None, rng=None):
+def _detect_brain_type_from_env():
+    """v1.5.9: khi ô 'AI Brain' để 'none' nhưng .env có key -> tự chọn 1 brain để SINH chủ đề.
+
+    Thứ tự ưu tiên: gemini -> openai -> qwen. Trả về tên brain hoặc None nếu không có key.
+    (Chỉ dùng cho tính năng 'Sinh chủ đề'; KHÔNG đổi brain dùng khi chạy warmup.)
+    """
+    try:
+        if os.getenv("GEMINI_API_KEY"):
+            return "gemini"
+        if os.getenv("OPENAI_API_KEY"):
+            return "openai"
+        if os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY"):
+            return "qwen-max"
+    except Exception:
+        pass
+    return None
+
+
+def generate_topics_from_seed(seed, n, brain=None, rng=None, log=None, lang="en"):
     """v1.5.7: biến 1 CHỦ ĐỀ GỐC -> n chủ đề con (mỗi profile 1 cái, có random).
 
     - Có brain: hỏi AI n chủ đề con quanh seed, mỗi dòng "Google | YouTube"; parse PHÒNG
@@ -378,8 +401,13 @@ def generate_topics_from_seed(seed, n, brain=None, rng=None):
     - Thiếu/không brain: BÙ bằng mẫu offline (_local_topic_variants) đã xáo bằng rng.
     - LUÔN trả về đúng n dict {"google_query","youtube_query"} với Google phân biệt.
       n<=0 -> []. seed rỗng + không brain -> vẫn ra n chủ đề từ chủ đề mặc định.
+    - v1.5.9: `log` = hàm nhận 1 chuỗi để GHI LẠI từng bước (gọi AI / AI trả gì /
+      bù offline bao nhiêu). None = im lặng (giữ nguyên cho test cũ).
+    - v1.6.1: `lang` (vi/en/ja/ko) quyết định NGÔN NGỮ từ khóa đầu ra (prompt + mẫu offline).
     """
     rng = rng or random
+    lang = lang_profiles.norm(lang)
+    _log = log if callable(log) else (lambda _m: None)
     try:
         n = int(n)
     except (ValueError, TypeError):
@@ -404,16 +432,25 @@ def generate_topics_from_seed(seed, n, brain=None, rng=None):
     if brain is not None and seed:
         try:
             prompt = (
-                "Bạn là người dùng Việt Nam. Từ 1 chủ đề gốc, hãy nghĩ ra nhiều chủ đề con "
-                "KHÁC NHAU để tìm hiểu trên mạng (mỗi chủ đề 1 hướng riêng, đa dạng).\n"
-                f"Chủ đề gốc: {seed}\n"
-                f"Hãy liệt kê đúng {n} chủ đề con khác nhau.\n"
-                "Yêu cầu:\n"
-                "- Mỗi dòng duy nhất, định dạng: <từ khóa Google> | <từ khóa YouTube>\n"
-                "- Từ khóa 3-8 từ, tự nhiên như người thật gõ, giữ ngôn ngữ của chủ đề gốc.\n"
-                "- Không đánh số, không giải thích, không dấu ngoặc, không dòng trống."
+                "You are a real person researching a topic online. From ONE seed topic, "
+                "think of several DIFFERENT, practically-related sub-topics a real user "
+                "would actually search for around it.\n"
+                f"Seed topic: {seed}\n"
+                f"List exactly {n} different related sub-topics.\n"
+                "Mix BOTH kinds, naturally:\n"
+                "- Real-world actions: where to buy gear/shoes/clothes, shops or places "
+                "nearby, today's weather, how to do it / lose weight, health benefits.\n"
+                "- Learning angles: techniques, comparisons, product reviews, background knowledge.\n"
+                "Rules:\n"
+                f"- {lang_profiles.prompt_lang_clause(lang)}\n"
+                "- One line only, format: <Google keyword> | <YouTube keyword>\n"
+                "- 3-8 words each, natural like a real user types.\n"
+                "- No numbering, no explanation, no quotes/brackets, no blank lines."
             )
+            _log(f"[*] Đang hỏi AI Brain sinh {n} chủ đề con quanh gốc '{seed}'...")
             raw = brain.ask_text(prompt)
+            raw_lines = [l for l in str(raw or "").splitlines() if l.strip()]
+            _log(f"[+] AI trả về {len(raw_lines)} dòng. Đang bóc tách...")
             for line in str(raw or "").splitlines():
                 txt = line.strip().lstrip("-*•\t ").strip()
                 while txt and txt[0].isdigit():
@@ -428,19 +465,26 @@ def generate_topics_from_seed(seed, n, brain=None, rng=None):
                 _add(g, y)
                 if len(pairs) >= n:
                     break
+            _log(f"[+] Lấy được {len(pairs)}/{n} chủ đề hợp lệ từ AI.")
         except Exception as e:
-            print(f"[!] Lỗi khi hỏi AI sinh chủ đề (dùng mẫu offline bù): {e}")
+            _log(f"[!] AI lỗi khi sinh chủ đề ({e}) — bù bằng mẫu offline.")
 
     # Bù cho đủ n bằng mẫu offline (seed rỗng -> _local_topic_variants tự có mặc định).
-    if len(pairs) < n:
-        for g in _local_topic_variants(seed, n * 2, rng):
+    ai_got = len(pairs)
+    if ai_got < n:
+        need = n - ai_got
+        if brain is None or not seed:
+            _log(f"[*] Tạo {need} chủ đề bằng mẫu offline (biến thể quanh '{seed or lang_profiles.default_seed(lang)}').")
+        else:
+            _log(f"[*] AI thiếu {need} chủ đề — bù thêm bằng mẫu offline.")
+        for g in _local_topic_variants(seed, n * 2, rng, lang=lang):
             _add(g, g)
             if len(pairs) >= n:
                 break
     return pairs[:n]
 
 
-def run_single_profile(api, profile_id, profile_name, themes, slot_index, screen_w, screen_h, skip_youtube, skip_random_keywords, brain_type="none", phase="clean", fixed_target_s=0, daily_seconds=0, pinned_theme="", assigned_theme=None):
+def run_single_profile(api, profile_id, profile_name, themes, slot_index, screen_w, screen_h, skip_youtube, skip_random_keywords, brain_type="none", phase="clean", fixed_target_s=0, daily_seconds=0, pinned_theme="", assigned_theme=None, keyword_lang="en"):
     print(f"\n[{profile_name}] 🚀 Đang yêu cầu API mở trình duyệt...")
     
     db = DatabaseHandler()
@@ -544,7 +588,8 @@ def run_single_profile(api, profile_id, profile_name, themes, slot_index, screen
                 skip_random_keywords=skip_random_keywords,
                 brain=brain,
                 phase=phase,
-                should_stop=STOP_EVENT.is_set
+                should_stop=STOP_EVENT.is_set,
+                keyword_lang=keyword_lang
             )
             # v1.5.2: TRẦN THỜI GIAN PHIÊN. Nếu người dùng GHIM "Mục tiêu vòng" (>0) thì mốc đó
             # vừa là mục tiêu ⏰ vừa là giới hạn cứng; để 0 -> warmup tự random 15-30 phút/phiên.
@@ -607,7 +652,33 @@ def run_single_profile(api, profile_id, profile_name, themes, slot_index, screen
         if not STOP_EVENT.is_set():
             time.sleep(2)
 
-def worker_wrapper(app_instance, profile_id, themes, slots_queue, screen_w, screen_h, skip_youtube, skip_random_keywords, browser_type=BROWSER_GPM, api_port="", brain_type="none", phase="clean", fixed_target_s=0, daily_seconds=0, pinned_theme=""):
+def _stagger_startup(slot, slot_key, profile_id):
+    """v1.6.5: chờ lệch pha cho WAVE 1 — các luồng không cùng khởi động một lúc.
+    slot i chờ ~ i * (20-45s), cap 300s. Chỉ áp LẦN ĐẦU mỗi slot (wave sau tự lệch pha
+    vì profile trước xong mới tới lượt). Trả False nếu user bấm Stop trong lúc chờ
+    (caller return ngay -> finally trả slot). Cập nhật SLOT_LAST_LOG để heartbeat vẫn
+    xanh (thread đang sống, chỉ đang đợi tới lượt mở trình duyệt)."""
+    with _STAGGER_LOCK:
+        first_time = slot not in _STAGGERED_SLOTS
+        if first_time:
+            _STAGGERED_SLOTS.add(slot)
+    if not first_time or slot <= 0:
+        return not STOP_EVENT.is_set()
+    if STOP_EVENT.is_set():
+        return False
+    stagger_s = min(slot * random.uniform(20, 45), 300)
+    print(f"[{slot_key}] Giãn khởi động +{int(stagger_s)}s để lệch pha với các luồng khác "
+          f"(profile {profile_id[:8]})...")
+    end = time.time() + stagger_s
+    while time.time() < end:
+        if STOP_EVENT.is_set():
+            return False
+        SLOT_LAST_LOG[slot_key] = time.time()  # giữ heartbeat xanh khi đang chờ
+        time.sleep(0.5)
+    return not STOP_EVENT.is_set()
+
+
+def worker_wrapper(app_instance, profile_id, themes, slots_queue, screen_w, screen_h, skip_youtube, skip_random_keywords, browser_type=BROWSER_GPM, api_port="", brain_type="none", phase="clean", fixed_target_s=0, daily_seconds=0, pinned_theme="", keyword_lang="en"):
     if STOP_EVENT.is_set():
         print(f"[Skip] Người dùng đã yêu cầu dừng - bỏ qua profile {profile_id[:8]}.")
         return
@@ -620,9 +691,15 @@ def worker_wrapper(app_instance, profile_id, themes, slots_queue, screen_w, scre
     THREAD_SLOTS[threading.get_ident()] = slot_key
     SLOT_PROFILE[slot_key] = profile_id  # Task 5: route log của slot này vào file profile
     SLOT_LAST_LOG[slot_key] = time.time()
-    SLOT_CYCLE_START[slot_key] = time.time()  # v1.4.0: mốc bắt đầu chu trình (đếm giờ ngâm live)
     SLOT_THREAD_ALIVE[slot_key] = True
     try:
+        # v1.6.5: giãn thời điểm khởi động giữa các luồng (wave 1) TRƯỚC khi mở trình duyệt,
+        # responsive với Stop. SLOT_CYCLE_START đặt SAU stagger nên giờ ngâm KHÔNG tính thời gian chờ.
+        if not _stagger_startup(slot, slot_key, profile_id):
+            print(f"[Skip] Dừng trong lúc giãn khởi động - bỏ qua profile {profile_id[:8]}.")
+            return  # finally vẫn chạy -> trả slot + dọn SLOT_* maps
+        SLOT_CYCLE_START[slot_key] = time.time()  # v1.4.0: mốc bắt đầu chu trình (đếm giờ ngâm live)
+
         # Truyền port tùy chỉnh vào factory nếu có
         kwargs = {}
         if api_port:
@@ -653,7 +730,7 @@ def worker_wrapper(app_instance, profile_id, themes, slots_queue, screen_w, scre
         # (test_v153 assert đúng chuỗi 'pinned_theme)' là tham số cuối của các dòng đó).
         _amap = getattr(app_instance, "_assignment_map", None) or {}
         _assigned = _amap.get(profile_id)
-        run_single_profile(api, profile_id, profile_name, themes, slot, screen_w, screen_h, skip_youtube, skip_random_keywords, brain_type, phase, fixed_target_s, daily_seconds, pinned_theme, _assigned)
+        run_single_profile(api, profile_id, profile_name, themes, slot, screen_w, screen_h, skip_youtube, skip_random_keywords, brain_type, phase, fixed_target_s, daily_seconds, pinned_theme, _assigned, keyword_lang)
     finally:
         SLOT_THREAD_ALIVE[slot_key] = False
         # v1.4.0: ghi chu trình vào DB (kể cả dừng/lỗi giữa chừng — số liệu trung thực).
@@ -942,8 +1019,16 @@ class AutomationApp:
         # Chỉ đổi trình bày/tên gọi style — giữ 100% tên widget attr, command, bind,
         # biến điều khiển (start/stop/report/dashboard/... hoạt động y như cũ).
         # --- Dải tiêu đề: logo + tên app + version pill + nút đổi theme ---
+        # v1.6.2: toàn bộ vùng dưới header giờ CUỘN ĐƯỢC (canvas dọc) — màn hình thấp
+        # vẫn kéo xuống tới ô nhập "CHỦ ĐỀ XUYÊN SUỐT" ở cuối app. Root chuyển sang grid:
+        # hàng 0 header, 1 viền, 2 vùng cấu hình (cuộn), 3 khung log, 4 status bar.
+        root.columnconfigure(0, weight=1)
+        # v1.6.3: 7 hàng — 0 header · 1 viền · 2 thanh công cụ (menu) · 3 vùng cấu hình (cuộn)
+        # · 4 dải CHỦ ĐỀ/TỪ KHÓA (GHIM — luôn hiện) · 5 khung log · 6 status bar.
+        root.rowconfigure(3, weight=2)  # vùng cấu hình cuộn (ưu tiên: setup quan trọng hơn log)
+        root.rowconfigure(5, weight=1)  # khung log
         hdr = tk.Frame(root, bg=self.C_HEADER_BG, height=58)
-        hdr.pack(fill="x", side="top")
+        hdr.grid(row=0, column=0, sticky="ew")
         hdr.pack_propagate(False)
         tk.Label(hdr, text="GPM", bg=self.C_ACCENT, fg="#ffffff",
                  font=("Segoe UI", 14, "bold"), width=4, pady=2).pack(
@@ -967,11 +1052,68 @@ class AutomationApp:
                                    highlightthickness=1,
                                    highlightbackground=self.C_BORDER)
         self.chk_theme.pack(side="right", padx=(0, 2))
-        tk.Frame(root, bg=self.C_BORDER, height=1).pack(fill="x")
+        tk.Frame(root, bg=self.C_BORDER, height=1).grid(row=1, column=0, sticky="ew")
+
+        # --- v1.6.3: THANH CÔNG CỤ (menu dropdown) — gom các nút Báo cáo/Công cụ cho gọn ---
+        toolbar = tk.Frame(root, bg=self.C_CARD2)
+        toolbar.grid(row=2, column=0, sticky="ew")
+        self.mbtn_report = ttk.Menubutton(toolbar, text="Báo cáo ▾", style="Tool.TButton")
+        self.mbtn_report.pack(side="left", padx=(12, 4), pady=4)
+        menu_report = tk.Menu(self.mbtn_report, tearoff=0)
+        menu_report.add_command(label="Báo cáo hoạt động", command=self.show_activity_report)
+        menu_report.add_command(label="Bảng tài khoản", command=self.show_account_dashboard)
+        menu_report.add_command(label="Xuất CSV", command=self.export_activity_csv)
+        menu_report.add_separator()
+        menu_report.add_command(label="Mốc nuôi acc (7 ngày)", command=self.show_stage_timeline)
+        menu_report.add_command(label="Thời gian ngâm (chu trình)", command=self.show_cycle_time_dialog)
+        menu_report.add_command(label="Giai đoạn ngâm (S0 → S5)", command=self.show_stage_board)
+        self.mbtn_report["menu"] = menu_report
+
+        self.mbtn_tools = ttk.Menubutton(toolbar, text="Công cụ ▾", style="Tool.TButton")
+        self.mbtn_tools.pack(side="left", padx=4, pady=4)
+        menu_tools = tk.Menu(self.mbtn_tools, tearoff=0)
+        menu_tools.add_command(label="Quản lý API key (cần mật khẩu)", command=self.open_api_key_manager)
+        menu_tools.add_command(label="Telegram (đổi mật khẩu từ xa)", command=self.open_telegram_manager)
+        menu_tools.add_separator()
+        menu_tools.add_command(label="Mở thư mục Log", command=self.open_logs_folder)
+        menu_tools.add_command(label="Nạp keywords.txt", command=self.load_keywords_file)
+        menu_tools.add_separator()
+        # v1.6.3: bộ lọc log chuyển vào menu (var_log_errors giữ nguyên tên — _apply_log_filter đọc nó)
+        self.var_log_errors = tk.BooleanVar(value=False)
+        menu_tools.add_checkbutton(label="Chỉ hiện lỗi + cảnh báo trong log",
+                                   variable=self.var_log_errors, command=self._apply_log_filter)
+        self.mbtn_tools["menu"] = menu_tools
+
+        # --- v1.6.2: vùng cấu hình bọc trong canvas cuộn dọc (header/toolbar/log/status ghim) ---
+        body_wrap = ttk.Frame(root, style="Outer.TFrame")
+        body_wrap.grid(row=3, column=0, sticky="nsew")
+        body_wrap.rowconfigure(0, weight=1)
+        body_wrap.columnconfigure(0, weight=1)
+        # height=330: vùng cấu hình đòi ~330px để không bị khung log (natural cao) nuốt chỗ;
+        # weight row 3 vẫn cho nó co giãn theo cửa sổ.
+        self.body_canvas = tk.Canvas(body_wrap, bg=self.C_BG, highlightthickness=0, bd=0, height=330)
+        self.body_canvas.grid(row=0, column=0, sticky="nsew")
+        _body_vbar = ttk.Scrollbar(body_wrap, orient="vertical",
+                                   command=self.body_canvas.yview)
+        _body_vbar.grid(row=0, column=1, sticky="ns")
+        self.body_canvas.configure(yscrollcommand=_body_vbar.set)
+        body_inner = ttk.Frame(self.body_canvas, style="Outer.TFrame")
+        _body_win = self.body_canvas.create_window((0, 0), window=body_inner, anchor="nw")
+        # scrollregion bám chiều cao nội dung; bề rộng cửa sổ trong bám bề rộng canvas
+        body_inner.bind("<Configure>", lambda e: self.body_canvas.configure(
+            scrollregion=self.body_canvas.bbox("all")))
+        self.body_canvas.bind("<Configure>", lambda e: self.body_canvas.itemconfigure(
+            _body_win, width=e.width))
+
+        def _body_wheel(event):
+            self.body_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        # bind_all khi trỏ vào vùng cấu hình; rời ra thì nhả (log/các canvas con tự xử lý)
+        self.body_canvas.bind("<Enter>", lambda e: self.body_canvas.bind_all("<MouseWheel>", _body_wheel))
+        self.body_canvas.bind("<Leave>", lambda e: self.body_canvas.unbind_all("<MouseWheel>"))
 
         # --- Lưới 2 cột: trái = checklist (trục chính), phải = cấu hình + điều khiển ---
-        outer = ttk.Frame(root, style="Outer.TFrame")
-        outer.pack(fill="x", side="top", padx=12, pady=(12, 0))
+        outer = ttk.Frame(body_inner, style="Outer.TFrame")
+        outer.pack(fill="x", side="top", padx=12, pady=(12, 8))
         outer.columnconfigure(0, weight=11)
         outer.columnconfigure(1, weight=9)
 
@@ -1008,7 +1150,7 @@ class AutomationApp:
 
         prof_box = ttk.Frame(card_prof)
         prof_box.pack(fill="both", expand=True, pady=(4, 2))
-        self.prof_canvas, self.prof_inner = self._make_scrollable(prof_box, 300)
+        self.prof_canvas, self.prof_inner = self._make_scrollable(prof_box, 240)
         # v1.3.6: mỗi dòng thêm "group" (tên nhóm GPM, "" = chưa có) + "hidden" (lọc đang ẩn)
         self.profile_rows = []  # [{"id", "name", "firefox", "var", "frame", "group", "hidden"}]
         self._group_headers = {}  # tên nhóm -> {"group", "frame", "count"} (label header)
@@ -1114,60 +1256,58 @@ class AutomationApp:
         self.btn_start.grid(row=0, column=0, columnspan=3, sticky="we", pady=(2, 6))
         self.btn_stop = ttk.Button(card_ctl, text="DỪNG AN TOÀN", command=self.request_stop_all,
                                    state="disabled", style="Stop.TButton")
-        self.btn_stop.grid(row=1, column=0, columnspan=3, sticky="we", pady=(0, 8))
-        ttk.Separator(card_ctl).grid(row=2, column=0, columnspan=3, sticky="we", pady=(0, 8))
+        self.btn_stop.grid(row=1, column=0, columnspan=3, sticky="we", pady=(0, 2))
 
-        self.btn_report = ttk.Button(card_ctl, text="Báo cáo", command=self.show_activity_report,
+        # v1.6.3: 10 nút Báo cáo/Công cụ đã chuyển lên THANH CÔNG CỤ (menu dropdown) phía trên.
+        # Vẫn tạo chúng như ĐỐI TƯỢNG ẨN (parent vào _legacy_tools, KHÔNG pack/grid nên không
+        # hiển thị) để _set_utils_state + start_automation (disable theo TÊN) và các test cũ
+        # (btn_api_keys/btn_stage/...) chạy nguyên — UI thật là mbtn_report / mbtn_tools.
+        # Tên attr + command + text giữ y nguyên; bộ lọc log (var_log_errors) đã nằm ở menu.
+        self._legacy_tools = ttk.Frame(right)  # không hiển thị — chỉ giữ đối tượng nút
+        _lt = self._legacy_tools
+        self.btn_report = ttk.Button(_lt, text="Báo cáo", command=self.show_activity_report,
                                      style="Tool.TButton")
-        self.btn_report.grid(row=3, column=0, sticky="we", padx=(0, 5), pady=2)
-        self.btn_dashboard = ttk.Button(card_ctl, text="Bảng tài khoản", command=self.show_account_dashboard,
+        self.btn_dashboard = ttk.Button(_lt, text="Bảng tài khoản", command=self.show_account_dashboard,
                                         style="Tool.TButton")
-        self.btn_dashboard.grid(row=3, column=1, sticky="we", padx=5, pady=2)
-        self.btn_export_csv = ttk.Button(card_ctl, text="Xuất CSV", command=self.export_activity_csv,
+        self.btn_export_csv = ttk.Button(_lt, text="Xuất CSV", command=self.export_activity_csv,
                                          style="Tool.TButton")
-        self.btn_export_csv.grid(row=3, column=2, sticky="we", padx=(5, 0), pady=2)
-        self.btn_open_logs = ttk.Button(card_ctl, text="Mở thư mục Log", command=self.open_logs_folder,
+        self.btn_open_logs = ttk.Button(_lt, text="Mở thư mục Log", command=self.open_logs_folder,
                                         style="Tool.TButton")
-        self.btn_open_logs.grid(row=4, column=0, columnspan=2, sticky="we", padx=(0, 5), pady=2)
-        self.btn_load_keywords = ttk.Button(card_ctl, text="Nạp keywords.txt", command=self.load_keywords_file,
+        self.btn_load_keywords = ttk.Button(_lt, text="Nạp keywords.txt", command=self.load_keywords_file,
                                             style="Tool.TButton")
-        self.btn_load_keywords.grid(row=4, column=2, sticky="we", padx=(5, 0), pady=2)
-        self.var_log_errors = tk.BooleanVar(value=False)
-        self.chk_log_errors = ttk.Checkbutton(card_ctl, text="Chỉ hiện lỗi + cảnh báo trong log",
-                                              variable=self.var_log_errors,
-                                              command=self._apply_log_filter)
-        self.chk_log_errors.grid(row=5, column=0, columnspan=3, sticky="w", pady=(8, 0))
-        # v1.3.5: mốc nuôi acc 7 ngày — đặt ngày bắt đầu + nhắc tới giai đoạn LÀM TAY (lắp mail)
-        # v1.3.7: nút theme đã lên header; timeline vẫn là nút hành động full-width cuối thẻ.
-        self.btn_timeline = ttk.Button(card_ctl, text="MỐC NUÔI ACC (7 NGÀY)",
+        self.btn_timeline = ttk.Button(_lt, text="MỐC NUÔI ACC (7 NGÀY)",
                                        command=self.show_stage_timeline, style="Tool.TButton")
-        self.btn_timeline.grid(row=6, column=0, columnspan=3, sticky="we", pady=(8, 0))
-        # v1.4.0: thời gian ngâm theo chu trình — tổng/TB/số vòng + chi tiết từng vòng
-        self.btn_cycle_time = ttk.Button(card_ctl, text="THỜI GIAN NGÂM (CHU TRÌNH)",
+        self.btn_cycle_time = ttk.Button(_lt, text="THỜI GIAN NGÂM (CHU TRÌNH)",
                                          command=self.show_cycle_time_dialog, style="Tool.TButton")
-        self.btn_cycle_time.grid(row=7, column=0, columnspan=3, sticky="we", pady=(6, 0))
-        # v1.4.8: tiện ích API key có cổng mật khẩu — khỏi phải sửa .env tay
-        self.btn_api_keys = ttk.Button(card_ctl, text="QUẢN LÝ API KEY (CẦN MẬT KHẨU)",
+        self.btn_api_keys = ttk.Button(_lt, text="QUẢN LÝ API KEY (CẦN MẬT KHẨU)",
                                        command=self.open_api_key_manager, style="Tool.TButton")
-        self.btn_api_keys.grid(row=8, column=0, columnspan=3, sticky="we", pady=(6, 0))
-        # v1.5.0: bảng lộ trình ngâm acc — mỗi kênh đang ở giai đoạn nào (S0 → S5)
-        self.btn_stage = ttk.Button(card_ctl, text="GIAI ĐOẠN NGÂM (S0 → S5)",
+        self.btn_stage = ttk.Button(_lt, text="GIAI ĐOẠN NGÂM (S0 → S5)",
                                     command=self.show_stage_board, style="Tool.TButton")
-        self.btn_stage.grid(row=9, column=0, columnspan=3, sticky="we", pady=(6, 0))
-        # v1.5.4: đổi mật khẩu cổng API từ xa qua bot Telegram (chat_id cố định)
-        self.btn_telegram = ttk.Button(card_ctl, text="TELEGRAM (ĐỔI MẬT KHẨU TỪ XA)",
+        self.btn_telegram = ttk.Button(_lt, text="TELEGRAM (ĐỔI MẬT KHẨU TỪ XA)",
                                        command=self.open_telegram_manager, style="Tool.TButton")
-        self.btn_telegram.grid(row=10, column=0, columnspan=3, sticky="we", pady=(6, 0))
 
         # ---------- Thẻ ngang dưới: hạt giống chủ đề (v1.5.2: không còn là cặp điều khiển phiên) ----------
-        card_kw = ttk.Labelframe(outer, text="  CHỦ ĐỀ XUYÊN SUỐT — HẠT GIỐNG CHO AI BRAIN  ", padding=(12, 8))
-        card_kw.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(0, 6))
+        # v1.6.3: dải CHỦ ĐỀ/TỪ KHÓA GHIM ở root row 4 (NGOÀI vùng cuộn) — LUÔN hiển thị,
+        # full-width cả cửa sổ, không còn bị đẩy xuống đáy khối cấu hình.
+        card_kw = ttk.Labelframe(root, text="  CHỦ ĐỀ XUYÊN SUỐT — HẠT GIỐNG CHO AI BRAIN  ", padding=(12, 8))
+        card_kw.grid(row=4, column=0, sticky="ew", padx=12, pady=(0, 4))
         kw_head = ttk.Frame(card_kw)
         kw_head.pack(fill="x")
-        ttk.Label(kw_head, text="Mỗi dòng 1 chủ đề · AI sinh kế hoạch 8-14 bước nối nhau · phiên 15-30 phút",
+        ttk.Label(kw_head, text="Mỗi dòng 1 chủ đề · AI sinh từ khóa liên quan thực tế theo NGÔN NGỮ chọn bên dưới · 8-14 bước nối nhau · phiên 15-30 phút",
                   style="Muted.TLabel").pack(side="left")
         ttk.Button(kw_head, text="+ Thêm chủ đề", command=lambda: self._add_kw_row("", "", focus=True),
                    style="Tool.TButton", width=14).pack(side="right")
+
+        # v1.6.1: NÚT CHỌN NGÔN NGỮ TỪ KHÓA (Việt / Anh / Nhật / Hàn) — chi phối cả
+        # "Sinh chủ đề" lẫn runtime (plan + đọc báo + thời tiết + mẫu offline).
+        lang_line = ttk.Frame(card_kw)
+        lang_line.pack(fill="x", pady=(6, 0))
+        ttk.Label(lang_line, text="Ngôn ngữ từ khóa:").pack(side="left")
+        self.var_kw_lang = tk.StringVar(value=lang_profiles.norm(self.cfg.get("keyword_lang", "en")))
+        for _code in lang_profiles.LANG_CODES:
+            ttk.Radiobutton(lang_line, text=lang_profiles.LANG_LABELS[_code],
+                            value=_code, variable=self.var_kw_lang,
+                            command=self._on_kw_lang_changed).pack(side="left", padx=(10, 0))
 
         # v1.5.7: CHỦ ĐỀ GỐC — gõ 1 chủ đề rồi bấm "Sinh chủ đề" để AI tạo mỗi profile 1 chủ đề
         # con (có random) -> xem trước -> áp dụng vào danh sách bên dưới. KHÔNG bấm Sinh mà vẫn
@@ -1184,9 +1324,8 @@ class AutomationApp:
         self.btn_gen_topics.pack(side="left")
         ttk.Label(
             card_kw,
-            text="Gõ 1 chủ đề gốc rồi bấm 'Sinh chủ đề': AI tạo mỗi profile 1 chủ đề con (có random) "
-                 "→ xem trước → áp dụng. Để trống = bot tự chọn trong danh sách; còn để chữ ở đây mà "
-                 "bấm CHẠY (không Sinh) = ghim mọi profile dùng đúng chủ đề này.",
+            text="'Sinh chủ đề' = AI tạo mỗi profile 1 chủ đề con (xem trước → áp dụng). "
+                 "Để trống = bot tự chọn · để chữ mà bấm CHẠY (không Sinh) = ghim mọi profile dùng chủ đề này.",
             style="Muted.TLabel",
         ).pack(fill="x", pady=(2, 0))
 
@@ -1199,15 +1338,15 @@ class AutomationApp:
                   font=("Segoe UI", 8, "bold")).pack(side="left", fill="x", expand=True, padx=(3, 30))
         kw_box = ttk.Frame(card_kw)
         kw_box.pack(fill="both", expand=True, pady=(2, 2))
-        self.kw_canvas, self.kw_inner = self._make_scrollable(kw_box, 96)
+        self.kw_canvas, self.kw_inner = self._make_scrollable(kw_box, 84)
         self.kw_rows = []  # [{"g": Entry, "y": Entry, "frame": Frame}]
         _g_saved = self.cfg.get("kw_google") or []
         _y_saved = self.cfg.get("kw_youtube") or []
         if _g_saved or _y_saved:
             self._rebuild_kw_rows(_g_saved, _y_saved)
         else:
-            self._add_kw_row("tin tức kinh tế vĩ mô", "global macro economics")
-            self._add_kw_row("chứng khoán mỹ", "us stock market analysis")
+            self._add_kw_row("walking for beginners", "how to start walking daily")
+            self._add_kw_row("us stock market today", "us stock market analysis")
 
         # ============ LOG + STATUS ============
         # --- STATUS BAR (Sprint 0.2): heartbeat các slot, màu theo trạng thái ---
@@ -1221,10 +1360,18 @@ class AutomationApp:
                                    bg=self.C_STATUS_BG, fg=self.C_STATUS_FG,
                                    font=("Segoe UI", 9),
                                    padx=10, pady=4)
-        self.lbl_status.pack(side="bottom", fill="x")
+        self.lbl_status.grid(row=6, column=0, sticky="ew")
 
-        self.notebook = ttk.Notebook(root)
-        self.notebook.pack(fill="both", expand=True, padx=10, pady=(4, 10))
+        # v1.6.3: khung log bọc frame cao cố định (grid_propagate False) để chiều cao "natural"
+        # lớn của Text/Treeview trong các tab KHÔNG nuốt chỗ vùng cấu hình; weight row 5 vẫn cho
+        # nó co giãn khi cửa sổ cao.
+        nb_wrap = ttk.Frame(root, height=230)
+        nb_wrap.grid(row=5, column=0, sticky="nsew", padx=10, pady=(4, 10))
+        nb_wrap.grid_propagate(False)
+        nb_wrap.rowconfigure(0, weight=1)
+        nb_wrap.columnconfigure(0, weight=1)
+        self.notebook = ttk.Notebook(nb_wrap)
+        self.notebook.grid(row=0, column=0, sticky="nsew")
 
         self.log_boxes = {}
         # v1.5.0 FIX CRASH: bọc sys.stdout PHẢI đặt ở ĐÂY — trước khi tạo tab bảng
@@ -2194,27 +2341,51 @@ class AutomationApp:
                 "Hãy tick chọn ít nhất 1 tài khoản (đang hiện) để biết cần sinh bao nhiêu chủ đề.",
             )
             return
-        brain_type = self.var_brain_type.get()
+        brain_type = (self.var_brain_type.get() or "none").strip()
+        # v1.5.9: ô 'AI Brain' đang để 'none' nhưng .env có key -> TỰ chọn 1 brain để sinh
+        # (chỉ cho tính năng này). Nhờ vậy user không phải nhớ đổi combobox mới xài được AI.
+        auto_pick = ""
+        if brain_type == "none":
+            auto_pick = _detect_brain_type_from_env() or ""
         self.btn_gen_topics.config(state="disabled", text="Đang sinh...")
+
+        print(f"\n[+] ===== SINH CHỦ ĐỀ: gốc '{seed}' cho {n} profile đang chọn =====")
+        if brain_type != "none":
+            print(f"[*] AI Brain đang chọn ở ô cấu hình: '{brain_type}'.")
+        elif auto_pick:
+            print(f"[*] Ô 'AI Brain' đang để 'none' nhưng .env có key -> TỰ dùng '{auto_pick}' để sinh chủ đề đa dạng.")
+        else:
+            print("[!] Chưa chọn AI Brain và .env KHÔNG có API key nào -> chỉ tạo biến thể offline quanh chủ đề gốc.")
+            print("    Muốn chủ đề THỰC SỰ khác nhau: chọn Gemini/OpenAI/Qwen ở ô 'AI Brain' hoặc nạp key qua 'QUẢN LÝ API KEY'.")
+
+        use_brain_type = brain_type if brain_type != "none" else auto_pick
+        kw_lang = lang_profiles.norm(self.var_kw_lang.get())
+        print(f"[*] Ngôn ngữ từ khóa: {lang_profiles.LANG_LABELS[kw_lang]}.")
 
         # Worker CHỈ tính toán (AI/offline) rồi đặt kết quả vào holder. MỌI thao tác Tk
         # (mở dialog, bật lại nút) do MAIN thread làm qua _poll_generated — vì gọi root.after
         # từ thread nền sẽ TREO (Tk không thread-safe). Poller được lên lịch từ main thread.
         self._gen_result = {"done": False}
 
+        # Worker KHÔNG in trực tiếp (print từ thread nền -> ThreadSafeStdout -> root.after
+        # = thao tác Tk chéo luồng, có thể treo). Thay vào đó gom log vào list, MAIN thread
+        # xả ra khung log trong _after_generate_topics.
         def _work():
+            logs = []
             brain = None
-            if brain_type and brain_type != "none":
+            if use_brain_type and use_brain_type != "none":
                 try:
-                    brain = BrainManager.get_brain(brain_type)
+                    brain = BrainManager.get_brain(use_brain_type)
+                    logs.append(f"[+] Đã khởi tạo AI Brain '{use_brain_type}' OK — bắt đầu hỏi AI.")
                 except Exception as e:
-                    print(f"[!] Không khởi tạo được AI Brain '{brain_type}' ({e}) - sinh bằng mẫu offline.")
+                    logs.append(f"[!] Không khởi tạo được AI Brain '{use_brain_type}' ({e}) - sinh bằng mẫu offline.")
                     brain = None
             try:
-                topics = generate_topics_from_seed(seed, n, brain=brain)
+                topics = generate_topics_from_seed(seed, n, brain=brain, log=logs.append, lang=kw_lang)
             except Exception as e:
-                print(f"[!] Lỗi sinh chủ đề ({e}) - dùng mẫu offline.")
-                topics = generate_topics_from_seed(seed, n, brain=None)
+                logs.append(f"[!] Lỗi sinh chủ đề ({e}) - dùng mẫu offline.")
+                topics = generate_topics_from_seed(seed, n, brain=None, log=logs.append, lang=kw_lang)
+            self._gen_result["logs"] = logs
             self._gen_result["topics"] = topics
             self._gen_result["seed"] = seed
             self._gen_result["done"] = True
@@ -2228,17 +2399,27 @@ class AutomationApp:
         if not res.get("done"):
             self.root.after(120, self._poll_generated)
             return
-        self._after_generate_topics(res.get("seed", ""), res.get("topics", []))
+        self._after_generate_topics(res.get("seed", ""), res.get("topics", []), res.get("logs", []))
 
-    def _after_generate_topics(self, seed, topics):
-        """Chạy trên main thread: bật lại nút + mở bảng xem trước."""
+    def _after_generate_topics(self, seed, topics, logs=None):
+        """Chạy trên main thread: xả log worker + bật lại nút + mở bảng xem trước."""
+        # Xả log các bước (gọi AI / AI trả gì / bù offline) ra khung log bên dưới.
+        for line in (logs or []):
+            print(line)
         try:
             self.btn_gen_topics.config(state="normal", text="Sinh chủ đề (theo số profile)")
         except Exception:
             pass
         if not topics:
+            print("[!] Không sinh được chủ đề nào.")
             messagebox.showwarning("Sinh chủ đề", "Không sinh được chủ đề nào. Hãy thử lại.")
             return
+        # Liệt kê kết quả cuối để user đối chiếu.
+        print(f"[+] Sinh xong {len(topics)} chủ đề:")
+        for i, t in enumerate(topics, 1):
+            g = (t.get("google_query") or "")
+            y = (t.get("youtube_query") or "")
+            print(f"    {i:>2}. Google: {g}" + (f"   | YouTube: {y}" if y and y != g else ""))
         self._show_generated_topics_preview(seed, topics)
 
     def _show_generated_topics_preview(self, seed, topics):
@@ -3064,6 +3245,24 @@ clearly tách nhóm hơn kiểu label trần + separator."""
         except Exception:
             return ""
 
+    def _keyword_lang(self):
+        """v1.6.1: mã ngôn ngữ từ khóa đang chọn (vi/en/ja/ko), chuẩn hoá an toàn."""
+        try:
+            return lang_profiles.norm(self.var_kw_lang.get())
+        except Exception:
+            return lang_profiles.DEFAULT_LANG
+
+    def _on_kw_lang_changed(self):
+        """v1.6.1: đổi nút ngôn ngữ -> lưu config ngay (best-effort)."""
+        try:
+            print(f"[*] Đã đổi ngôn ngữ từ khóa -> {lang_profiles.LANG_LABELS[self._keyword_lang()]}.")
+        except Exception:
+            pass
+        try:
+            self.save_current_config()
+        except Exception:
+            pass
+
     def save_current_config(self):
         cfg = dict(self.cfg)
         cfg["profiles"] = [
@@ -3101,6 +3300,7 @@ clearly tách nhóm hơn kiểu label trần + separator."""
         except (ValueError, TypeError):
             cfg["daily_minutes"] = 30
         cfg["pinned_theme"] = self._pinned_theme_text()  # v1.5.3: nhớ chủ đề ghim
+        cfg["keyword_lang"] = self._keyword_lang()  # v1.6.1: nhớ ngôn ngữ từ khóa
         # v1.5.4: nhớ trạng thái bot Telegram (token nằm trong .env, KHÔNG lưu ở đây)
         cfg["telegram_enabled"] = bool(self.cfg.get("telegram_enabled", False))
         cfg["telegram_chat_id"] = str(self.cfg.get("telegram_chat_id", "") or "")
@@ -4037,6 +4237,8 @@ clearly tách nhóm hơn kiểu label trần + separator."""
 
         # ── v1.5.7 — hết block phân bổ ─────────────────────────────────────────────
         STOP_EVENT.clear()  # phiên mới: xóa cờ dừng của lần trước
+        with _STAGGER_LOCK:  # v1.6.5: reset danh sách slot đã stagger cho phiên mới
+            _STAGGERED_SLOTS.clear()
 
         self.btn_start.config(state="disabled", text="ĐANG CHẠY...")
         self.btn_stop.config(state="normal")
@@ -4049,7 +4251,10 @@ clearly tách nhóm hơn kiểu label trần + separator."""
                     self.btn_phase_info, self.btn_cycle_time, self.btn_api_keys,
                     self.btn_stage, self.btn_telegram, self.btn_gen_topics):
             btn.config(state="disabled")
-        
+        # v1.6.3: greyed 2 menu công cụ trên toolbar khi đang chạy
+        self.mbtn_report.config(state="disabled")
+        self.mbtn_tools.config(state="disabled")
+
         for tab_name in list(self.log_boxes.keys()):
             if tab_name != "MAIN":
                 del self.log_boxes[tab_name]
@@ -4087,10 +4292,12 @@ clearly tách nhóm hơn kiểu label trần + separator."""
         fixed_target_s = self._target_secs()  # v1.4.1: >0 = mục tiêu cố định; 0 = bot random mỗi vòng
         daily_seconds = self._daily_secs()    # v1.5.3: hạn mức phút/NGÀY cho mỗi acc (0 = tắt)
         pinned_theme = self._pinned_theme_text()  # v1.5.3: "" = bot tự chọn chủ đề trong danh sách
+        kw_lang = self._keyword_lang()        # v1.6.1: ngôn ngữ từ khóa (vi/en/ja/ko)
+        print(f"[System] Ngôn ngữ từ khóa: {lang_profiles.LANG_LABELS[kw_lang]}")
         self.save_current_config()  # Sprint 1.1: nhớ mọi lựa chọn của phiên này
-        threading.Thread(target=self.run_thread_pool, args=(profiles, themes, max_workers, screen_w, screen_h, skip_youtube, skip_random_keywords, browser_type, api_port, brain_type, phase, fixed_target_s, daily_seconds, pinned_theme), daemon=True).start()
+        threading.Thread(target=self.run_thread_pool, args=(profiles, themes, max_workers, screen_w, screen_h, skip_youtube, skip_random_keywords, browser_type, api_port, brain_type, phase, fixed_target_s, daily_seconds, pinned_theme, kw_lang), daemon=True).start()
 
-    def run_thread_pool(self, profiles, themes, max_workers, screen_w, screen_h, skip_youtube, skip_random_keywords, browser_type=BROWSER_GPM, api_port="", brain_type="none", phase="clean", fixed_target_s=0, daily_seconds=0, pinned_theme=""):
+    def run_thread_pool(self, profiles, themes, max_workers, screen_w, screen_h, skip_youtube, skip_random_keywords, browser_type=BROWSER_GPM, api_port="", brain_type="none", phase="clean", fixed_target_s=0, daily_seconds=0, pinned_theme="", keyword_lang="en"):
         # v1.4.4: số slot = min(luồng, số profile) - khớp số tab đã tạo trong start_automation
         n_slots = min(max_workers, len(profiles))
         slots_queue = queue.Queue()
@@ -4115,7 +4322,7 @@ clearly tách nhóm hơn kiểu label trần + separator."""
                 print("[System] Chủ đề: bot tự chọn 1 chủ đề trong danh sách cho mỗi profile")
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(worker_wrapper, self, pid, themes, slots_queue, screen_w, screen_h, skip_youtube, skip_random_keywords, browser_type, api_port, brain_type, phase, fixed_target_s, daily_seconds, pinned_theme) for pid in profiles]
+            futures = [executor.submit(worker_wrapper, self, pid, themes, slots_queue, screen_w, screen_h, skip_youtube, skip_random_keywords, browser_type, api_port, brain_type, phase, fixed_target_s, daily_seconds, pinned_theme, keyword_lang) for pid in profiles]
             # v1.2.9: lỗi thoát khỏi worker từng làm f.result() ném lên đây -> toàn bộ
             # đoạn khôi phục UI bên dưới bị nhảy qua -> GUI kẹt "ĐANG CHẠY" vĩnh viễn.
             # Nay mọi exception của future chỉ in log, UI luôn được khôi phục (finally).
@@ -4745,6 +4952,9 @@ clearly tách nhóm hơn kiểu label trần + separator."""
                     self.btn_phase_info, self.btn_cycle_time, self.btn_api_keys,
                     self.btn_stage, self.btn_telegram, self.btn_gen_topics):
             btn.config(state=state)
+        # v1.6.3: 2 menu công cụ trên toolbar bật/tắt cùng nhịp (nút ở trên là đối tượng ẩn)
+        for mb in (self.mbtn_report, self.mbtn_tools):
+            mb.config(state=state)
 
     def _apply_log_filter(self):
         """Sprint 2: bật/tắt chế độ 'chỉ hiện lỗi+cảnh báo' cho máy chủ log (GUI + file)."""

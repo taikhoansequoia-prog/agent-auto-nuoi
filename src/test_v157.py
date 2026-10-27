@@ -126,6 +126,10 @@ check("tách '|' -> youtube riêng 'world news today'",
       ta[0]["youtube_query"] == "world news today", ta[0]["youtube_query"])
 check("prompt có nhắc chủ đề gốc + số lượng",
       "news the world" in ai_ok.last_prompt and "4" in ai_ok.last_prompt)
+# v1.6.0/1.6.1: prompt phải ép ngôn ngữ (mặc định English) + từ khóa liên quan thực tế (trộn)
+check("prompt sinh chủ đề ép English (mặc định)", "MUST be in English" in ai_ok.last_prompt)
+check("prompt nhắc hoạt động thực tế (buy/weather) + học hỏi (review)",
+      all(w in ai_ok.last_prompt.lower() for w in ("buy", "weather", "review")))
 
 # AI trả THIẾU (2 dòng) cho n=6 -> offline bù đủ 6, không trùng phần AI
 ai_short = FakeBrain("alpha topic | alpha yt\nbeta topic | beta yt\n")
@@ -237,6 +241,9 @@ app.profile_rows.append({"id": "hd", "name": "HD", "firefox": False, "hidden": T
                          "var": tk.BooleanVar(value=True)})
 
 app.var_brain_type.set("none")  # offline -> không gọi mạng, chạy tức thời trong thread
+# v1.5.9: ô 'none' giờ TỰ dò brain từ .env; ép trả None để section này thuần offline/tất định.
+_orig_detect = ui._detect_brain_type_from_env
+ui._detect_brain_type_from_env = lambda: None
 app.var_pinned_theme.set("tin thế giới")
 
 captured = {}
@@ -255,6 +262,7 @@ check("N = đúng số profile đang chọn (3 — bỏ firefox + hidden)",
       len(captured.get("topics", [])) == 3, str(len(captured.get("topics", []))))
 check("nút bật lại sau khi sinh xong", not app.btn_gen_topics.instate(["disabled"]))
 app._show_generated_topics_preview = _orig_preview
+ui._detect_brain_type_from_env = _orig_detect
 
 # --- Dialog xem trước THẬT + bấm 'Áp dụng' -> đổ vào kw_rows + clear chủ đề gốc ---
 topics3 = ui.generate_topics_from_seed("tin thế giới", 3, brain=None)
@@ -320,10 +328,10 @@ hr("4. Regression — plumbing pinned_theme KHÔNG đổi (test_v153 phụ thu�
 # =====================================================================
 check("run_single_profile vẫn có 'pinned_theme=\"\"' trong chữ ký",
       'pinned_theme="", assigned_theme=None):' in src or 'pinned_theme=""' in src)
-check("Thread args vẫn kết thúc bằng 'pinned_theme)'",
-      "daily_seconds, pinned_theme), daemon=True" in src)
-check("worker_wrapper submit vẫn truyền 'pinned_theme)' cuối",
-      "daily_seconds, pinned_theme) for pid in profiles" in src)
+check("Thread args kết thúc bằng 'pinned_theme, kw_lang)' (v1.6.1 thêm ngôn ngữ)",
+      "daily_seconds, pinned_theme, kw_lang), daemon=True" in src)
+check("worker_wrapper submit truyền 'pinned_theme, keyword_lang)' cuối (v1.6.1)",
+      "daily_seconds, pinned_theme, keyword_lang) for pid in profiles" in src)
 check("assign_topics_for_run vẫn còn (phân bổ chủ đề cho profile)",
       "def assign_topics_for_run(" in src)
 check("_collect_kw_pairs vẫn còn (nguồn chủ đề cho phân bổ)",
@@ -333,6 +341,54 @@ try:
     ui_root.destroy()
 except Exception:
     pass
+
+# =====================================================================
+hr("5. v1.5.9 — tự dò AI Brain từ .env + log callback trong sinh chủ đề")
+# =====================================================================
+_env_orig = ui.os.getenv
+
+
+def _fake_env(mapping):
+    def _g(k, default=None):
+        return mapping.get(k, default)
+    return _g
+
+
+ui.os.getenv = _fake_env({"GEMINI_API_KEY": "x"})
+check("có GEMINI_API_KEY -> auto-pick 'gemini'", ui._detect_brain_type_from_env() == "gemini")
+ui.os.getenv = _fake_env({"OPENAI_API_KEY": "x"})
+check("chỉ có OPENAI_API_KEY -> auto-pick 'openai'", ui._detect_brain_type_from_env() == "openai")
+ui.os.getenv = _fake_env({"QWEN_API_KEY": "x"})
+check("chỉ có QWEN_API_KEY -> auto-pick 'qwen-max'", ui._detect_brain_type_from_env() == "qwen-max")
+ui.os.getenv = _fake_env({})
+check("không key nào -> auto-pick None", ui._detect_brain_type_from_env() is None)
+ui.os.getenv = _env_orig
+
+# log callback nhận được các bước (offline path)
+_lines = []
+gen("nấu ăn", 3, brain=None, log=_lines.append)
+check("log callback NHẬN dòng offline", any("offline" in l.lower() for l in _lines), str(len(_lines)))
+
+# log callback nhận AI thiếu -> có dòng 'AI' + 'offline bù'
+class _Stub:
+    def ask_text(self, p):
+        return "alpha | a\n"  # chỉ 1 dòng cho n=3
+
+
+_lines2 = []
+gen("khoa học", 3, brain=_Stub(), log=_lines2.append)
+check("log có dòng 'hỏi AI'", any("hỏi AI" in l for l in _lines2), str(_lines2))
+check("log có dòng AI trả về N dòng", any("AI trả về" in l for l in _lines2))
+check("log callback không throw khi log=None", gen("x", 2, brain=None, log=None) is not None)
+
+check("generate_topics_from_seed có tham số 'log'", "log=None" in
+      read_src("ui_main.py").split("def generate_topics_from_seed")[1][:120])
+check("_detect_brain_type_from_env tồn tại (module-level)",
+      "def _detect_brain_type_from_env(" in src)
+check("on_generate_topics tự dò brain khi 'none'",
+      "_detect_brain_type_from_env()" in src and "auto_pick" in src)
+check("worker gom log vào list (không print chéo luồng)",
+      "logs.append" in src and "log=logs.append" in src)
 
 # =====================================================================
 print("\n" + "=" * 70)

@@ -1,8 +1,8 @@
 ﻿# App version. build.ps1 rewrites __build_time__ (and __version__ if -Version passed)
 # on every EXE packaging. Running from source (python ui_main.py) has no build stamp.
 # NOTE: keep this file ASCII-only so PowerShell string-rewrites never corrupt it.
-__version__ = "1.5.8"
-__build_time__ = "27/10/2026 11:06"
+__version__ = "1.6.5"
+__build_time__ = "27/10/2026 17:19"
 
 
 def get_version_line():

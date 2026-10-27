@@ -448,8 +448,8 @@ check("action_read_news giữ fallback goto thẳng CÓ NHÃN '(Fallback Google)
       "page.goto(target_site" in rn_txt and "(Fallback Google)" in rn_txt)
 check("action_read_news KHÔNG còn goto thẳng vô điều kiện",
       rn_txt.index("_navigate_via_google") < rn_txt.index("page.goto(target_site"))
-check("Danh sách 13 trang báo giữ nguyên",
-      rn_txt.count('("https://') >= 13, str(rn_txt.count('("https://')))
+check("action_read_news lấy site theo NGÔN NGỮ (v1.6.1: _LANG.news_sites)",
+      "_LANG.news_sites(" in rn_txt)
 # 6c. Tài liệu UI (PHASE_DETAILS) phản ánh đúng: clean bỏ Reddit + đi qua cổng Google
 i_clean_pd = src_ui.index('"clean": {')
 i_mail_pd = src_ui.index('"mail": {', i_clean_pd)

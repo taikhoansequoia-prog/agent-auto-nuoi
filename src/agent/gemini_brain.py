@@ -3,7 +3,7 @@ import json
 from .base_brain import BaseBrain
 
 class GeminiBrain(BaseBrain):
-    def __init__(self, api_key: str, model_name="gemini-1.5-flash", endpoint=None):
+    def __init__(self, api_key: str, model_name="gemini-flash-latest", endpoint=None):
         # v1.5.6: endpoint trống -> cổng chính của SDK; có endpoint -> ghi đè (proxy/gateway riêng).
         endpoint = (endpoint or "").strip()
         if endpoint:

@@ -2,6 +2,15 @@ import hashlib
 import random
 import time
 
+# v1.6.1: hồ sơ ngôn ngữ từ khóa dùng CHUNG với ui_main (vi/en/ja/ko).
+try:
+    from src import lang_profiles as _LANG
+except Exception:  # fallback nếu 'src' chưa nằm trên sys.path
+    import os as _os
+    import sys as _sys
+    _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))))
+    from src import lang_profiles as _LANG
+
 
 def _fmt_session_dur(seconds):
     """Định dạng giây -> '45s' / '12m30s' cho log giới hạn phiên (v1.5.2)."""
@@ -13,13 +22,32 @@ def _fmt_session_dur(seconds):
         return f"{s}s"
     return f"{s // 60}m{s % 60:02d}s"
 
+
+def _sample_action_rest(rng=random):
+    """v1.6.4: nghỉ giữa 2 HÀNH ĐỘNG — nhịp 'rất chậm ~3-6 phút/trang' (người đọc kỹ
+    từng trang, không dồn dập). Trả về số giây nghỉ theo phân phối 3 tầng:
+      - 15%  : 45-90s   (chuyển việc hơi nhanh)
+      - 70%  : 120-240s (nghỉ bình thường, 2-4 phút)
+      - 15%  : 300-480s (phân tâm / rời máy một lúc, 5-8 phút)
+    Trung vị ~180s. Bản v1.5.8 chỉ 25-60s nên các tác vụ nhanh dồn 2-3 activity/phút,
+    nhìn rõ là bot — giãn mạnh để lịch sử trình duyệt trông như người thật."""
+    roll = rng.random()
+    if roll < 0.15:
+        return rng.uniform(45, 90)
+    elif roll < 0.85:
+        return rng.uniform(120, 240)
+    return rng.uniform(300, 480)
+
+
 class WarmupWorkflow:
-    def __init__(self, context, db_handler=None, profile_id=None, needs_sub=False, session_theme=None, skip_youtube=False, skip_random_keywords=False, brain=None, phase="clean", should_stop=None):
+    def __init__(self, context, db_handler=None, profile_id=None, needs_sub=False, session_theme=None, skip_youtube=False, skip_random_keywords=False, brain=None, phase="clean", should_stop=None, keyword_lang="en"):
         self.context = context
         self.db = db_handler
         self.profile_id = profile_id
         self.needs_sub = needs_sub
         self.brain = brain
+        # v1.6.1: ngôn ngữ từ khóa (vi/en/ja/ko) — chi phối prompt AI + mẫu offline + báo + thời tiết
+        self.keyword_lang = _LANG.norm(keyword_lang)
         self.skip_youtube = skip_youtube # LƯU TRẠNG THÁI TICK BỎ QUA YOUTUBE
         self.skip_random_keywords = skip_random_keywords # LƯU TRẠNG THÁI TICK BỎ QUA TỪ KHÓA NGẪU NHIÊN
         # Giai đoạn ngâm: "clean" (trắng, chưa mail) | "mail" (đã login mail) | "youtube" (cày YouTube)
@@ -35,10 +63,7 @@ class WarmupWorkflow:
         # Base WPM cố định per profile: phân bố 45-75, đỉnh ~58
         self.base_wpm = max(45, min(75, 55 + int(seed_hash[:4], 16) % 26 - 10))
 
-        self.session_theme = session_theme or {
-            "google_query": "tin tức mới nhất",
-            "youtube_query": "video giải trí"
-        }
+        self.session_theme = session_theme or _LANG.session_default(self.keyword_lang)
         # v1.4.5: nhớ selector popup đã báo lần cuối -> chống log lặp (xem _close_popups)
         self._popup_sel_memo = None
         # v1.5.2: KẾ HOẠCH CỤM — 1 chủ đề xuyên suốt -> chuỗi sub-query nối nhau
@@ -86,18 +111,18 @@ class WarmupWorkflow:
         try:
             if topic_hint:
                 prompt = (
-                    f"Bạn là người dùng Việt Nam đang lướt web. Hãy tạo 1 từ khóa tìm kiếm {platform_label} "
-                    "ngắn gọn (3-8 từ), là biến thể hoặc cách diễn đạt khác xoay quanh chủ đề cho trước "
-                    "(không cần giống nguyên văn; có thể cụ thể hơn hoặc rộng hơn một chút nhưng phải liên quan). "
-                    f"Chủ đề: {topic_hint}. "
-                    "Giữ đúng ngôn ngữ tự nhiên như người dùng thật (chủ đề tiếng Việt thì trả về tiếng Việt). "
-                    "Chỉ trả về đúng từ khóa, không giải thích, không dấu ngoặc."
+                    f"You are a real person browsing the web. Create 1 short {platform_label} search keyword "
+                    "(3-8 words), a variant or different phrasing around the given topic "
+                    "(need not be verbatim; can be a bit more specific or broader but must stay related). "
+                    f"Topic: {topic_hint}. "
+                    f"{_LANG.prompt_lang_clause(self.keyword_lang)} "
+                    "Return only the keyword, no explanation, no quotes."
                 )
             else:
                 prompt = (
-                    "Bạn là người dùng Việt Nam đang lướt web. Hãy tạo 1 từ khóa tìm kiếm Google "
-                    "ngắn gọn (3-8 từ), tự nhiên, đa dạng chủ đề (tin tức, giải trí, mua sắm, học tập...). "
-                    "Chỉ trả về đúng từ khóa, không giải thích, không dấu ngoặc."
+                    "You are a real person browsing the web. Create 1 short Google search keyword "
+                    "(3-8 words), natural, varied topics (news, entertainment, shopping, learning...). "
+                    f"{_LANG.prompt_lang_clause(self.keyword_lang)} Return only the keyword, no explanation, no quotes."
                 )
             result = self.brain.ask_text(prompt)
             # Làm sạch kết quả
@@ -137,17 +162,19 @@ class WarmupWorkflow:
         try:
             n_min, n_max = 8, min(max_steps, 14)
             prompt = (
-                "Bạn là người dùng Việt Nam đang nghiên cứu một chủ đề trên mạng trong 15-30 phút.\n"
-                f"Chủ đề xuyên suốt của phiên hôm nay: {topic_hint or 'tự chọn một chủ đề đời thường'}.\n"
-                f"Hãy lập một kế hoạch gồm {n_min}-{n_max} bước TÌM KIẾM NỐI NHAU xoay quanh chủ đề đó, theo kiểu "
-                "người thật đào sâu dần: tìm hiểu cách làm, xem video hướng dẫn, tìm đồ dụng/công cụ liên quan, "
-                "tìm địa điểm/hạng mục gần nhà trên Google Maps, đọc tin tức, đọc Wikipedia, lướt TikTok.\n"
-                "Yêu cầu:\n"
-                "- Các bước PHẢI liên quan chuỗi tới chủ đề (bước sau kế thừa bước trước), không lan man.\n"
-                "- Mỗi dòng duy nhất, định dạng: <nền tảng> | <từ khóa 3-8 từ>\n"
-                "- nền tảng chỉ được chọn trong: google, youtube, maps, news, wikipedia, tiktok.\n"
-                "- Từ khóa giữ ngôn ngữ tự nhiên như người dùng thật gõ (tiếng Việt nếu chủ đề tiếng Việt).\n"
-                "- Không đánh số, không giải thích, không dấu ngoặc, không dòng trống."
+                "You are a real person researching a topic online for 15-30 minutes.\n"
+                f"The topic of today's session: {topic_hint or 'pick an everyday topic yourself'}.\n"
+                f"Make a plan of {n_min}-{n_max} CHAINED SEARCH steps around that topic, like a real "
+                "person digging deeper. MIX two kinds of steps: (a) real-world actions — where to "
+                "buy gear/shoes/clothes, find shops or places nearby on Google Maps, check today's "
+                "weather, how to do it / lose weight, health benefits; (b) learning — how-to, watch "
+                "tutorial videos, read news, read Wikipedia, compare/review, browse TikTok.\n"
+                "Rules:\n"
+                "- Steps MUST be chained & related to the topic (each builds on the previous), not random.\n"
+                "- One line only, format: <platform> | <keyword 3-8 words>\n"
+                "- platform must be one of: google, youtube, maps, news, wikipedia, tiktok.\n"
+                f"- {_LANG.prompt_lang_clause(self.keyword_lang)}\n"
+                "- No numbering, no explanation, no quotes/brackets, no blank lines."
             )
             result = self.brain.ask_text(prompt)
             steps = self._parse_plan_text(result)
@@ -198,21 +225,10 @@ class WarmupWorkflow:
     def _local_plan_steps(self, topic=""):
         """Bộ bước dự phòng khi KHÔNG có AI Brain (brain=None) — vẫn giữ đúng tinh thần
         'một chủ đề xuyên suốt, đào sâu dần', sinh từ template + RNG per-profile."""
-        base = (topic or "sức khỏe").strip().lower()
-        pool = [
-            ("google", base),
-            ("google", f"hướng dẫn {base}"),
-            ("news", f"tin tức {base}"),
-            ("wikipedia", base),
-            ("youtube", f"{base} cho người mới"),
-            ("google", f"đồ dùng cần thiết cho {base}"),
-            ("maps", f"cửa hàng {base} gần đây"),
-            ("maps", f"{base} ngoài trời gần đây"),
-            ("google", f"sai lầm thường gặp khi {base}"),
-            ("youtube", f"{base} thực tế"),
-            ("tiktok", base),
-            ("news", f"xu hướng {base}"),
-        ]
+        # v1.6.1: pool bước theo NGÔN NGỮ (vi/en/ja/ko) — trộn hoạt động thực tế
+        # (mua đồ/địa điểm/thời tiết/sức khỏe) với học hỏi (how-to/review/wiki).
+        base = (topic or _LANG.plan_default_base(self.keyword_lang)).strip().lower()
+        pool = [(plat, tmpl.format(s=base)) for plat, tmpl in _LANG.plan_pool(self.keyword_lang)]
         # Gom theo nền tảng để BẢO ĐẢM mỗi nền tảng có mặt trong chuỗi bước
         # (kế hoạch dự phòng mà thiếu Maps/YouTube thì mất luôn tinh thần v1.5.2).
         by_plat = {}
@@ -267,6 +283,10 @@ class WarmupWorkflow:
         theme_q = (self.session_theme or {}).get(theme_key, "")
         return (theme_q or default or "").strip()
 
+    def _dkw(self, kind):
+        """v1.6.1: default từ khóa theo NGÔN NGỮ (hiếm khi chạm — chỉ khi plan + theme rỗng)."""
+        return _LANG.default_kw(self.keyword_lang, kind)
+
     # ==========================================
     # CÁC HÀNH ĐỘNG NGUYÊN TỬ (ATOMIC ACTIONS)
     # ==========================================
@@ -280,7 +300,7 @@ class WarmupWorkflow:
         print("  -> [Action] Tìm kiếm Google...")
         
         # [v1.5.2] Ưu tiên bước kế tiếp của KẾ HOẠCH CỤM, fallback cặp từ khóa cũ
-        keyword = self._plan_keyword("google", "google_query", "tin tức thời sự")
+        keyword = self._plan_keyword("google", "google_query", self._dkw("google"))
         
         try:
             page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=45000)
@@ -329,33 +349,20 @@ class WarmupWorkflow:
         người thật tìm qua Google rồi mới bấm kết quả. Fallback goto thẳng CHỈ khi cổng lỗi."""
         print("  -> [Action] Đọc báo tin tức (qua cổng Google)...")
         # (url đích để fallback, domain dùng cho cổng Google + khớp kết quả tìm kiếm)
-        sites = [
-            ("https://vietnamnet.vn", "vietnamnet.vn"),
-            ("https://tienphong.vn", "tienphong.vn"),
-            ("https://vnexpress.net", "vnexpress.net"),
-            ("https://dantri.com.vn", "dantri.com.vn"),
-            ("https://thanhnien.vn", "thanhnien.vn"),
-            ("https://tuoitre.vn", "tuoitre.vn"),
-            ("https://zingnews.vn", "zingnews.vn"),
-            ("https://cafef.vn", "cafef.vn"),
-            ("https://edition.cnn.com/", "cnn.com"),
-            ("https://www.bbc.com/news", "bbc.com"),
-            ("https://www.nytimes.com/", "nytimes.com"),
-            ("https://www.theguardian.com/international", "theguardian.com"),
-            ("https://www.reuters.com/", "reuters.com"),
-        ]
+        # v1.6.1: báo theo NGÔN NGỮ chọn (vi=báo Việt, en=báo Anh, ja=báo Nhật, ko=báo Hàn).
+        sites = _LANG.news_sites(self.keyword_lang)
         target_site, target_domain = random.choice(sites)
         
         try:
             # Cổng vào tự nhiên: gõ "chủ đề + tên báo" trên Google rồi bấm kết quả
-            landed = self._navigate_via_google(page, self._plan_keyword("news", "google_query", "tin tức mới nhất"), target_domain)
+            landed = self._navigate_via_google(page, self._plan_keyword("news", "google_query", self._dkw("news")), target_domain)
             if not landed:
                 print("      + [Google] Không đáp đúng trang báo qua cổng Google — (Fallback Google) vào thẳng.")
                 page.goto(target_site, wait_until="domcontentloaded", timeout=45000)
             self.restore_mouse_position(page)
             
-            # Lướt nhẹ trang chủ 30-60 giây để ngắm các tin nổi bật
-            self._simulate_scroll_and_read(page, 30, 60)
+            # Lướt nhẹ trang chủ để ngắm các tin nổi bật (v1.6.4: 30-60s -> 60-120s, nhịp chậm)
+            self._simulate_scroll_and_read(page, 60, 120)
             
             num_clicks = random.randint(1, 2)
             for i in range(num_clicks):
@@ -410,8 +417,8 @@ class WarmupWorkflow:
                             self.restore_mouse_position(active_page)
                             
                             print("      + Bắt đầu lướt đọc bài báo...")
-                            self._simulate_scroll_and_read(active_page, 60, 180)
-                            
+                            self._simulate_scroll_and_read(active_page, 150, 330)  # v1.6.4: 2.5-5.5 phút
+
                             print("      + Đọc xong, đóng tab phụ và quay về trang chủ.")
                             active_page.close()
                             page.bring_to_front()
@@ -429,8 +436,8 @@ class WarmupWorkflow:
                             self.restore_mouse_position(page)
                             
                             print("      + Bắt đầu lướt đọc bài báo...")
-                            self._simulate_scroll_and_read(page, 60, 180)
-                            
+                            self._simulate_scroll_and_read(page, 150, 330)  # v1.6.4: 2.5-5.5 phút
+
                             if i < num_clicks - 1:
                                 print("      + Back lại trang chủ để tìm bài tiếp theo...")
                                 page.go_back(wait_until="commit", timeout=15000)
@@ -607,7 +614,7 @@ class WarmupWorkflow:
             search_box = active_page.locator("textarea[name='q'], input[name='q']").first
             
             # v1.5.2: ưu tiên bước kế tiếp của KẾ HOẠCH CỤM, fallback cặp từ khóa cũ
-            query = self._plan_keyword("news", "google_query", "thời sự hôm nay")
+            query = self._plan_keyword("news", "google_query", self._dkw("news2"))
             
             print(f"      + Đang nhập từ khóa: '{query}'...")
             self.human_type(search_box, query)
@@ -698,7 +705,7 @@ class WarmupWorkflow:
                             self.smooth_scroll(active_page, random.randint(400, 800))
                         else:
                             self.smooth_scroll(active_page, -random.randint(200, 400))
-                        self.random_sleep(8, 16)
+                        self.random_sleep(12, 26)  # v1.6.4: giãn nhịp đọc (8-16s -> 12-26s)
                         
                     print(f"      + Đã đọc xong bài {article_index + 1}.")
                     
@@ -1010,7 +1017,7 @@ class WarmupWorkflow:
             print("  -> [Action] Tìm kiếm và xem trên YouTube...")
             
             # v1.5.2: ưu tiên bước kế tiếp của KẾ HOẠCH CỤM, fallback cặp từ khóa cũ
-            keyword = self._plan_keyword("youtube", "youtube_query", "tin tức mới nhất")
+            keyword = self._plan_keyword("youtube", "youtube_query", self._dkw("video"))
             
             try:
                 page.goto("https://www.youtube.com", wait_until="domcontentloaded", timeout=45000)
@@ -1383,7 +1390,7 @@ class WarmupWorkflow:
             import urllib.parse
             
             # Chọn từ khóa tự nhiên giống người dùng đang hỏi
-            query = random.choice(["thời tiết hôm nay thế nào", "dự báo thời tiết", "weather today", "nhiệt độ ngoài trời"])
+            query = random.choice(_LANG.weather_queries(self.keyword_lang))
             
             # Quay xổ số quyết định hành vi tìm kiếm (50/50)
             if random.random() < 0.5:
@@ -1692,9 +1699,11 @@ class WarmupWorkflow:
             page.wait_for_load_state("domcontentloaded", timeout=50000)
             self.random_sleep(2, 4)
 
-            # --- Hành vi cuộn lướt kết quả như người thật (6-13s) ---
+            # --- Hành vi cuộn lướt kết quả như người thật ---
+            # v1.6.4: 6-13s khiến "... - Google Search" và trang đích luôn dính cùng 1 phút
+            # trong lịch sử -> cân nhắc 15-35s (người thật đọc snippet trước khi bấm).
             print("      + [Google] Đang lướt cân nhắc các kết quả tìm kiếm...")
-            end_time = time.time() + random.randint(6, 13)
+            end_time = time.time() + random.randint(15, 35)
             while time.time() < end_time:
                 self.smooth_scroll(page, random.randint(250, 650))
                 self.random_sleep(2, 4)
@@ -1848,7 +1857,7 @@ class WarmupWorkflow:
         Chỉ mô phỏng hành vi xem và cuộn để tạo tín hiệu fingerprint."""
         print("  -> [Action] Bắt đầu phiên TikTok: Tìm qua Google + lướt video (chế độ xem, không tương tác)...")
         try:
-            keyword = self._plan_keyword("tiktok", "google_query", "giai tri").strip()
+            keyword = self._plan_keyword("tiktok", "google_query", self._dkw("tiktok")).strip()
 
             # --- CỔNG VÀO TỰ NHIÊN: Google -> gõ từ khóa -> cuộn -> bấm kết quả TikTok ---
             landed = self._navigate_via_google(page, keyword, "tiktok.com")
@@ -2046,7 +2055,7 @@ class WarmupWorkflow:
         try:
             lang = self._detect_locale_lang(page)
             base_url = f"https://{lang}.wikipedia.org"
-            keyword = self._plan_keyword("wikipedia", "google_query", "kien thuc").strip()
+            keyword = self._plan_keyword("wikipedia", "google_query", self._dkw("wiki")).strip()
             print(f"      + Ngôn ngữ trình duyệt: '{lang}' -> đích {base_url}")
 
             # --- CỔNG VÀO TỰ NHIÊN: Google -> gõ từ khóa -> cuộn -> bấm kết quả Wikipedia ---
@@ -2064,8 +2073,8 @@ class WarmupWorkflow:
                 except Exception:
                     pass
 
-            # Đọc bài hiện tại (tái dùng helper có sẵn)
-            self._simulate_scroll_and_read(page, random.randint(60, 120), random.randint(150, 240))
+            # Đọc bài hiện tại (tái dùng helper có sẵn) — v1.6.4: giãn (2-3.3 phút -> ~2-6.7 phút)
+            self._simulate_scroll_and_read(page, random.randint(120, 200), random.randint(260, 400))
 
             # 40% nhảy sang 1 bài nội bộ rồi đọc tiếp
             if random.random() < 0.4:
@@ -2087,7 +2096,7 @@ class WarmupWorkflow:
                         self.human_click(page, target_link)
                         page.wait_for_load_state("domcontentloaded", timeout=30000)
                         self.random_sleep(2, 4)
-                        self._simulate_scroll_and_read(page, random.randint(50, 90), random.randint(120, 200))
+                        self._simulate_scroll_and_read(page, random.randint(100, 160), random.randint(220, 340))  # v1.6.4: giãn
                     else:
                         print("      + [Bỏ qua] Không tìm thấy liên kết nội bộ phù hợp.")
                 except Exception as link_err:
@@ -2117,7 +2126,7 @@ class WarmupWorkflow:
         card đều 0 khớp (Maps render bằng canvas/virtual list)."""
         print("  -> [Action] Tìm địa điểm trên Google Maps (qua cổng Google)...")
         try:
-            keyword = self._plan_keyword("maps", "google_query", "địa điểm gần đây").strip()
+            keyword = self._plan_keyword("maps", "google_query", self._dkw("maps")).strip()
             print(f"      + Cụm tìm địa điểm: '{keyword}'")
 
             # --- CỔNG GOOGLE: không goto thẳng Maps (nguyên tắc vàng §3) ---
@@ -2586,7 +2595,7 @@ class WarmupWorkflow:
                 return False
 
             # 3. Chon nhanh
-            query = (self.session_theme.get("google_query") or "tin tức mới nhất").strip()
+            query = (self.session_theme.get("google_query") or self._dkw("news")).strip()
             branch_a_possible = True
             if self.phase == "youtube":
                 branch_a_possible = False  # Pha 3 chi cham, khong tao moi
@@ -2800,18 +2809,12 @@ class WarmupWorkflow:
                     self._log_activity(page, chosen_action_name, status=_status,
                                        duration_s=round(time.time() - _t0, 1), error=_err)
             
-            # v1.5.8: NGHỈ GIỮA 2 HÀNH ĐỘNG — chuẩn hóa theo nhịp người thật. Bản cũ chỉ 5-10s
-            # nên các tác vụ nhanh (thời tiết/tài chính/tìm kiếm) dồn 2-3 activity trong 1 phút,
-            # nhìn rõ là bot. Người thật đổi tác vụ thì nghỉ lâu hơn + biến thiên (phần lớn nghỉ
-            # vừa, thỉnh thoảng lướt nhanh, thỉnh thoảng phân tâm/rời máy một lúc).
-            roll = random.random()
-            if roll < 0.15:
-                rest_s = random.uniform(10, 20)      # lướt nhanh sang việc kế
-            elif roll < 0.85:
-                rest_s = random.uniform(25, 60)      # nghỉ bình thường giữa 2 tác vụ
-            else:
-                rest_s = random.uniform(80, 160)     # bị phân tâm / rời máy một lúc
-            print(f"      + Nghỉ ~{rest_s:.0f}s trước khi chuyển hành động (kiểu người thật)...")
+            # v1.6.4: NGHỈ GIỮA 2 HÀNH ĐỘNG — nhịp "rất chậm ~3-6 phút/trang" (người đọc kỹ).
+            # Bản v1.5.8 (25-60s) vẫn để các tác vụ nhanh dồn 2-3 activity cùng 1 phút, nhìn rõ
+            # là bot. Giãn mạnh qua _sample_action_rest (trung vị ~180s) để lịch sử trình duyệt
+            # trông như người thật. Logic chọn/chạy action giữ nguyên.
+            rest_s = _sample_action_rest()
+            print(f"      + Nghỉ ~{_fmt_session_dur(rest_s)} trước khi chuyển hành động (kiểu người thật)...")
             # Responsive với Stop + trần thời gian phiên (poll 0.5s, chạm deadline thì dừng ngay)
             sleep_end = time.time() + rest_s
             while time.time() < sleep_end and not self.stop_requested:

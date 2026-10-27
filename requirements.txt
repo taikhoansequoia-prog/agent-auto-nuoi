@@ -1,4 +1,5 @@
 playwright
 google-generativeai
+openai
 requests
 python-dotenv

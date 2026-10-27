@@ -189,11 +189,15 @@ plan = wf._safe_ask_plan("chạy bộ")
 check("brain trả text -> parse được >=4 bước", plan is not None and len(plan) == 7, f"n={len(plan) if plan else 0}")
 check("chỉ 1 lượt hỏi AI cho kế hoạch", len(wf.brain.prompts) == 1)
 check("prompt nêu đúng seed chủ đề", "chạy bộ" in wf.brain.prompts[0])
-check("prompt yêu cầu 8-14 bước", "8-14 bước" in wf.brain.prompts[0])
+check("prompt yêu cầu 8-14 bước", "8-14" in wf.brain.prompts[0])
 check("prompt liệt kê đủ nền tảng", all(k in wf.brain.prompts[0] for k in ("google", "youtube", "maps", "news", "wikipedia", "tiktok")))
-check("prompt yêu cầu format '<nền tảng> | <từ khóa'",
-      "<nền tảng> | <từ khóa" in wf.brain.prompts[0],
-      "prompt thật: '<nền tảng> | <từ khóa 3-8 từ>'")
+check("prompt yêu cầu format '<platform> | <keyword'",
+      "<platform> | <keyword" in wf.brain.prompts[0],
+      "prompt thật: '<platform> | <keyword 3-8 words>'")
+# v1.6.0/1.6.1: từ khóa ép ngôn ngữ (mặc định English) + trộn hoạt động thực tế
+check("prompt plan ép English (mặc định)", "MUST be in English" in wf.brain.prompts[0])
+check("prompt plan nhắc hoạt động thực tế (buy/weather)",
+      "buy" in wf.brain.prompts[0].lower() and "weather" in wf.brain.prompts[0].lower())
 
 wf = make_wf(brain=FakeBrain("google | chỉ một dòng"))
 check("quá ít bước -> None (dùng dự phòng)", wf._safe_ask_plan("chạy bộ") is None)

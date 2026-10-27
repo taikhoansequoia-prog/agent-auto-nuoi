@@ -7,6 +7,16 @@ hiddenimports = []
 tmp_ret = collect_all('src')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
+# v1.5.9: gói các SDK AI Brain (lazy-import trong agent/*) để EXE sinh chủ đề bằng AI.
+# Bọc try: thiếu gói nào thì bỏ qua (brain tương ứng sẽ tự rơi về offline lúc chạy).
+for _pkg in ('openai', 'google.generativeai', 'google.ai.generativelanguage',
+             'grpc', 'dotenv'):
+    try:
+        _r = collect_all(_pkg)
+        datas += _r[0]; binaries += _r[1]; hiddenimports += _r[2]
+    except Exception as _e:
+        print(f"[spec] bo qua collect_all({_pkg}): {_e}")
+
 
 a = Analysis(
     ['ui_main.py'],
