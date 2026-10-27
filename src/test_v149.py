@@ -173,19 +173,19 @@ app = ui.AutomationApp(root := tk.Tk())
 root.update()
 check("AutomationApp khởi tạo OK", hasattr(app, "board_frame") and hasattr(app, "board_tree"))
 tabs = list(app.notebook.tabs())
-# v1.5.0: thứ tự chủ đích = MAIN -> (slots) -> THỜI LƯỢNG CHẠY -> GIAI ĐOẠN NGÂM.
-# Tab giai đoạn NỐI SAU bảng thời lượng, nên board giờ là tab Á CUỐI.
-check("notebook có >= 3 tab (MAIN + board + stage)", len(tabs) >= 3, str(len(tabs)))
-check("tab CUỐI là giai đoạn", "GIAI ĐOẠN" in app.notebook.tab(tabs[-1], "text"),
+# v1.5.7: thứ tự chủ đích = MAIN -> (slots) -> THỜI LƯỢNG CHẠY -> GIAI ĐOẠN NGÂM -> PHÂN BỔ CHỦ ĐỀ.
+# Tab phân bổ chủ đề NỐI SAU giai đoạn -> nó là tab CUỐI; stage á cuối; board thứ 3 từ cuối.
+check("notebook có >= 4 tab (MAIN + board + stage + phân bổ)", len(tabs) >= 4, str(len(tabs)))
+check("tab CUỐI là phân bổ chủ đề", "PHÂN BỔ" in app.notebook.tab(tabs[-1], "text"),
       repr(app.notebook.tab(tabs[-1], "text")))
-check("tab Á CUỐI là board thời lượng", "THỜI LƯỢNG" in app.notebook.tab(tabs[-2], "text"),
+check("tab á cuối là giai đoạn", "GIAI ĐOẠN" in app.notebook.tab(tabs[-2], "text"),
       repr(app.notebook.tab(tabs[-2], "text")))
 check("board là con trực tiếp của notebook", app.board_frame in app.notebook.winfo_children())
 check("stage là con trực tiếp của notebook", app.stage_frame in app.notebook.winfo_children())
-check("board_frame == tab áp chót", str(app.board_frame) in tabs[-2],
+check("board_frame == tab thứ 3 từ cuối", str(app.board_frame) in tabs[-3],
+      repr(app.notebook.tab(tabs[-3], "text")))
+check("stage_frame == tab á cuối", str(app.stage_frame) in tabs[-2],
       repr(app.notebook.tab(tabs[-2], "text")))
-check("stage_frame == tab cuối", str(app.stage_frame) in tabs[-1],
-      repr(app.notebook.tab(tabs[-1], "text")))
 tree = app.board_tree
 cols = list(tree.cget("columns"))
 check("board có đúng 15 cột", len(cols) == 15 == len(app.BOARD_COLUMNS), str(cols))

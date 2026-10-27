@@ -445,8 +445,9 @@ root.update()
 
 nb = app.notebook
 tab_texts = [str(nb.tab(t, "text") or "").strip() for t in nb.tabs()]
-check("tab cuối là GIAI ĐOẠN NGÂM", tab_texts[-1] == "GIAI ĐOẠN NGÂM", str(tab_texts))
-check("tab áp chót là THỜI LƯỢNG CHẠY", tab_texts[-2] == "THỜI LƯỢNG CHẠY", str(tab_texts))
+# v1.5.7: tab PHÂN BỔ CHỦ ĐỀ nối SAU giai đoạn -> cuối cùng; giai đoạn áp chót.
+check("tab cuối là PHÂN BỔ CHỦ ĐỀ", tab_texts[-1] == "PHÂN BỔ CHỦ ĐỀ", str(tab_texts))
+check("tab áp chót là GIAI ĐOẠN NGÂM", tab_texts[-2] == "GIAI ĐOẠN NGÂM", str(tab_texts))
 check("tab giai đoạn là con của notebook", app.stage_frame in nb.winfo_children())
 
 t = app.stage_tree
@@ -927,18 +928,23 @@ MB.yes = True
 _rtp = ui.AutomationApp.run_thread_pool
 app.ping_api = lambda *a, **k: True
 ui.AutomationApp.run_thread_pool = lambda self, *a, **k: None
+# v1.5.7: start_automation có thêm hộp xác nhận PHÂN BỔ CHỦ ĐỀ (Toplevel modal wait_window)
+# -> stub trả True để test không treo chờ người bấm.
+app.show_assignment_confirm = lambda *a, **k: True
 try:
     app.start_automation()
     root.update()
     texts = [str(nb.tab(x, "text") or "").strip() for x in nb.tabs()]
     check("start: không nhân đôi tab giai đoạn",
           texts.count("GIAI ĐOẠN NGÂM") == 1, str(texts))
-    check("start: tab giai đoạn vẫn CUỐI cùng", texts[-1] == "GIAI ĐOẠN NGÂM", str(texts))
+    # v1.5.7: thứ tự tab báo cáo = THỜI LƯỢNG CHẠY -> GIAI ĐOẠN NGÂM -> PHÂN BỔ CHỦ ĐỀ.
+    check("start: tab phân bổ chủ đề CUỐI cùng", texts[-1] == "PHÂN BỔ CHỦ ĐỀ", str(texts))
+    check("start: tab giai đoạn áp chót", texts[-2] == "GIAI ĐOẠN NGÂM", str(texts))
     check("start: board nằm trước tab giai đoạn",
-          "THỜI LƯỢNG CHẠY" in texts and texts.index("THỜI LƯỢNG CHẠY") == len(texts) - 2,
+          "THỜI LƯỢNG CHẠY" in texts and texts.index("THỜI LƯỢNG CHẠY") == len(texts) - 3,
           str(texts))
-    check("start: slot nằm giữa MAIN và 2 tab báo cáo",
-          texts[1].startswith("Slot") and len(texts) == 1 + 2 + 2, str(texts))
+    check("start: slot nằm giữa MAIN và 3 tab báo cáo",
+          texts[1].startswith("Slot") and len(texts) == 1 + 2 + 3, str(texts))
     titles = MB.titles("askyesno")
     check("start: hỏi cảnh báo lệch chế độ ngâm", titles[:1] == ["Lệch chế độ ngâm"], str(titles))
     q = " ".join(m for k, t, m in MB.calls if k == "askyesno")
@@ -973,6 +979,10 @@ finally:
     ui.AutomationApp.run_thread_pool = _rtp
     try:
         del app.ping_api          # trả về method thật của class
+    except AttributeError:
+        pass
+    try:
+        del app.show_assignment_confirm   # trả về method thật của class
     except AttributeError:
         pass
     app._running = False

@@ -294,7 +294,153 @@ def adjust_window_bounds(context, slot_index, screen_w, screen_h):
 # ==========================================
 # 2. HÀM WORKER: XỬ LÝ ĐỘC LẬP CHO TỪNG PROFILE
 # ==========================================
-def run_single_profile(api, profile_id, profile_name, themes, slot_index, screen_w, screen_h, skip_youtube, skip_random_keywords, brain_type="none", phase="clean", fixed_target_s=0, daily_seconds=0, pinned_theme=""):
+def assign_topics_for_run(profile_ids, themes):
+    """v1.5.7: PHÂN BỔ CHỦ ĐỀ cho từng profile của phiên (chiến thuật "xáo + chia vòng tròn").
+
+    Mỗi dòng chủ đề người dùng nhập (kw_rows) được đảm bảo xuất hiện ít nhất 1 lần
+    trong phiên (khi số profile >= số chủ đề). Nếu số profile > số chủ đề thì sau khi
+    chia hết 1 vòng ta XÁO LẠI danh sách rồi chia tiếp -> không có chủ đề nào bị "cố định"
+    cho 1 nhóm profile lặp đi lặp lại, tính random được giữ nguyên.
+
+    Returns:
+        (assignment_map, rows):
+          assignment_map : {profile_id: {"google_query": str, "youtube_query": str}}
+          rows           : list[dict] theo THỨ TỰ profile, mỗi dict:
+                           {"pid", "google", "yt", "round"} (round = vòng chia 1-based)
+    """
+    assignment_map = {}
+    rows = []
+    pids = list(profile_ids or [])
+    pool = [dict(t) for t in (themes or []) if t and (t.get("google_query") or "").strip()]
+    if not pids or not pool:
+        return assignment_map, rows
+    shuffled = pool[:]
+    random.shuffle(shuffled)
+    for i, pid in enumerate(pids):
+        if i > 0 and i % len(shuffled) == 0:
+            # hết 1 vòng -> xáo lại rồi chia tiếp (chủ đề không bị cố định theo thứ tự)
+            random.shuffle(shuffled)
+        theme = shuffled[i % len(shuffled)]
+        assignment_map[pid] = theme
+        rows.append({
+            "pid": pid,
+            "google": theme.get("google_query", ""),
+            "yt": theme.get("youtube_query", ""),
+            "round": (i // len(shuffled)) + 1,
+        })
+    return assignment_map, rows
+
+# v1.5.7: mẫu offline BÙ khi không có AI hoặc AI trả thiếu (vẫn giữ random thật qua rng).
+_TOPIC_TEMPLATES = (
+    "{s}", "{s} mới nhất", "tin tức {s}", "{s} hôm nay", "phân tích {s}",
+    "{s} là gì", "hướng dẫn {s}", "{s} cho người mới", "xu hướng {s}",
+    "{s} 2026", "review {s}", "{s} chi tiết", "kinh nghiệm {s}",
+    "so sánh {s}", "cập nhật {s}", "{s} nổi bật",
+)
+
+
+def _local_topic_variants(seed, n, rng=None):
+    """Sinh n biến thể chủ đề quanh `seed` HOÀN TOÀN offline (seed + mẫu + RNG).
+
+    Luôn trả về đúng n chuỗi PHÂN BIỆT. Dùng khi brain=None hoặc để BÙ cho phần AI
+    trả thiếu. rng=None -> dùng random global. seed rỗng -> chủ đề mặc định.
+    """
+    rng = rng or random
+    base = (seed or "chủ đề thời sự").strip() or "chủ đề thời sự"
+    seen, uniq = set(), []
+    for t in _TOPIC_TEMPLATES:
+        cand = t.format(s=base).strip()
+        k = cand.lower()
+        if cand and k not in seen:
+            seen.add(k)
+            uniq.append(cand)
+    rng.shuffle(uniq)
+    out = list(uniq[:n])
+    # Nếu cần nhiều hơn số mẫu -> thêm hậu tố số để bảo đảm đủ n chuỗi phân biệt.
+    suffix = 2
+    while len(out) < n and uniq:
+        for t in uniq:
+            cand = f"{t} ({suffix})"
+            if cand.lower() not in seen:
+                seen.add(cand.lower())
+                out.append(cand)
+                if len(out) >= n:
+                    break
+        suffix += 1
+    return out[:n]
+
+
+def generate_topics_from_seed(seed, n, brain=None, rng=None):
+    """v1.5.7: biến 1 CHỦ ĐỀ GỐC -> n chủ đề con (mỗi profile 1 cái, có random).
+
+    - Có brain: hỏi AI n chủ đề con quanh seed, mỗi dòng "Google | YouTube"; parse PHÒNG
+      THỦ (bỏ số thứ tự/ký hiệu đầu dòng, tách '|', cắt >90 ký tự, dedupe theo Google).
+    - Thiếu/không brain: BÙ bằng mẫu offline (_local_topic_variants) đã xáo bằng rng.
+    - LUÔN trả về đúng n dict {"google_query","youtube_query"} với Google phân biệt.
+      n<=0 -> []. seed rỗng + không brain -> vẫn ra n chủ đề từ chủ đề mặc định.
+    """
+    rng = rng or random
+    try:
+        n = int(n)
+    except (ValueError, TypeError):
+        n = 0
+    if n <= 0:
+        return []
+    seed = (seed or "").strip()
+
+    pairs, seen = [], set()
+
+    def _add(g, y):
+        g = (g or "").strip()
+        y = (y or "").strip()
+        if not g or len(pairs) >= n:
+            return
+        key = g.lower()
+        if key in seen:
+            return
+        seen.add(key)
+        pairs.append({"google_query": g[:90], "youtube_query": (y or g)[:90]})
+
+    if brain is not None and seed:
+        try:
+            prompt = (
+                "Bạn là người dùng Việt Nam. Từ 1 chủ đề gốc, hãy nghĩ ra nhiều chủ đề con "
+                "KHÁC NHAU để tìm hiểu trên mạng (mỗi chủ đề 1 hướng riêng, đa dạng).\n"
+                f"Chủ đề gốc: {seed}\n"
+                f"Hãy liệt kê đúng {n} chủ đề con khác nhau.\n"
+                "Yêu cầu:\n"
+                "- Mỗi dòng duy nhất, định dạng: <từ khóa Google> | <từ khóa YouTube>\n"
+                "- Từ khóa 3-8 từ, tự nhiên như người thật gõ, giữ ngôn ngữ của chủ đề gốc.\n"
+                "- Không đánh số, không giải thích, không dấu ngoặc, không dòng trống."
+            )
+            raw = brain.ask_text(prompt)
+            for line in str(raw or "").splitlines():
+                txt = line.strip().lstrip("-*•\t ").strip()
+                while txt and txt[0].isdigit():
+                    txt = txt[1:].lstrip(".)- \t")
+                if not txt:
+                    continue
+                if "|" in txt:
+                    left, _, right = txt.partition("|")
+                    g, y = left.strip().strip('"\''), right.strip().strip('"\'')
+                else:
+                    g, y = txt.strip().strip('"\''), ""
+                _add(g, y)
+                if len(pairs) >= n:
+                    break
+        except Exception as e:
+            print(f"[!] Lỗi khi hỏi AI sinh chủ đề (dùng mẫu offline bù): {e}")
+
+    # Bù cho đủ n bằng mẫu offline (seed rỗng -> _local_topic_variants tự có mặc định).
+    if len(pairs) < n:
+        for g in _local_topic_variants(seed, n * 2, rng):
+            _add(g, g)
+            if len(pairs) >= n:
+                break
+    return pairs[:n]
+
+
+def run_single_profile(api, profile_id, profile_name, themes, slot_index, screen_w, screen_h, skip_youtube, skip_random_keywords, brain_type="none", phase="clean", fixed_target_s=0, daily_seconds=0, pinned_theme="", assigned_theme=None):
     print(f"\n[{profile_name}] 🚀 Đang yêu cầu API mở trình duyệt...")
     
     db = DatabaseHandler()
@@ -369,14 +515,23 @@ def run_single_profile(api, profile_id, profile_name, themes, slot_index, screen
             adjust_window_bounds(context, slot_index, screen_w, screen_h)
             time.sleep(1)
             
+            # v1.5.7: PHÂN BỔ CHỦ ĐỀ — chủ đề được chia sẵn cho từng profile ở lớp UI
+            # (assign_topics_for_run) nên ở đây chỉ cần nhận việc, không random nữa.
+            if assigned_theme:
+                session_theme = {
+                    "google_query": assigned_theme.get("google_query", ""),
+                    "youtube_query": assigned_theme.get("youtube_query", ""),
+                }
+                print(f"[{profile_name}] 🎯 Chủ đề PHÂN BỔ: {session_theme['google_query']}")
             # v1.5.3: GHIM CHỦ ĐỀ — người dùng nhập tay thì mọi profile của phiên dùng đúng
             # chủ đề đó (bỏ qua random.choice trong danh sách).
-            if pinned_theme:
+            elif pinned_theme:
                 themes_use = [{"google_query": pinned_theme, "youtube_query": pinned_theme}]
                 print(f"[{profile_name}] 🎯 Chủ đề GHIM: {pinned_theme}")
+                session_theme = random.choice(themes_use)
             else:
                 themes_use = themes
-            session_theme = random.choice(themes_use)
+                session_theme = random.choice(themes_use)
             print(f"[{profile_name}] ⚙️ Kích hoạt hệ thống với chủ đề: {session_theme['google_query']}")
             
             warmup = WarmupWorkflow(
@@ -493,7 +648,12 @@ def worker_wrapper(app_instance, profile_id, themes, slots_queue, screen_w, scre
 
         app_instance.update_tab_name(slot, profile_name)
 
-        run_single_profile(api, profile_id, profile_name, themes, slot, screen_w, screen_h, skip_youtube, skip_random_keywords, brain_type, phase, fixed_target_s, daily_seconds, pinned_theme)
+        # v1.5.7: nhận chủ đề đã phân bổ (tính ở start_automation, xem assign_topics_for_run).
+        # Đi qua app_instance để KHÔNG phải đổi arity của worker_wrapper/run_thread_pool
+        # (test_v153 assert đúng chuỗi 'pinned_theme)' là tham số cuối của các dòng đó).
+        _amap = getattr(app_instance, "_assignment_map", None) or {}
+        _assigned = _amap.get(profile_id)
+        run_single_profile(api, profile_id, profile_name, themes, slot, screen_w, screen_h, skip_youtube, skip_random_keywords, brain_type, phase, fixed_target_s, daily_seconds, pinned_theme, _assigned)
     finally:
         SLOT_THREAD_ALIVE[slot_key] = False
         # v1.4.0: ghi chu trình vào DB (kể cả dừng/lỗi giữa chừng — số liệu trung thực).
@@ -1009,15 +1169,26 @@ class AutomationApp:
         ttk.Button(kw_head, text="+ Thêm chủ đề", command=lambda: self._add_kw_row("", "", focus=True),
                    style="Tool.TButton", width=14).pack(side="right")
 
-        # v1.5.3: GHIM CHỦ ĐỀ cho phiên này — để trống = bot tự chọn 1 dòng trong danh sách bên dưới.
-        # Ghim xong thì MỌI profile của phiên dùng đúng chủ đề đó (bỏ qua random.choice).
+        # v1.5.7: CHỦ ĐỀ GỐC — gõ 1 chủ đề rồi bấm "Sinh chủ đề" để AI tạo mỗi profile 1 chủ đề
+        # con (có random) -> xem trước -> áp dụng vào danh sách bên dưới. KHÔNG bấm Sinh mà vẫn
+        # để chữ ở đây = GHIM: mọi profile chạy đúng chủ đề này (hành vi v1.5.3 giữ nguyên —
+        # biến var_pinned_theme + plumbing pinned_theme KHÔNG đổi).
         pin_line = ttk.Frame(card_kw)
         pin_line.pack(fill="x", pady=(6, 0))
-        ttk.Label(pin_line, text="Ghim chủ đề:").pack(side="left")
+        ttk.Label(pin_line, text="Chủ đề gốc:").pack(side="left")
         self.var_pinned_theme = tk.StringVar(value="")
         self.ent_pinned_theme = ttk.Entry(pin_line, textvariable=self.var_pinned_theme)
         self.ent_pinned_theme.pack(side="left", fill="x", expand=True, padx=(6, 6))
-        ttk.Label(pin_line, text="(trống = bot tự chọn trong danh sách)", style="Muted.TLabel").pack(side="left")
+        self.btn_gen_topics = ttk.Button(pin_line, text="Sinh chủ đề (theo số profile)",
+                                         command=self.on_generate_topics, style="Tool.TButton", width=26)
+        self.btn_gen_topics.pack(side="left")
+        ttk.Label(
+            card_kw,
+            text="Gõ 1 chủ đề gốc rồi bấm 'Sinh chủ đề': AI tạo mỗi profile 1 chủ đề con (có random) "
+                 "→ xem trước → áp dụng. Để trống = bot tự chọn trong danh sách; còn để chữ ở đây mà "
+                 "bấm CHẠY (không Sinh) = ghim mọi profile dùng đúng chủ đề này.",
+            style="Muted.TLabel",
+        ).pack(fill="x", pady=(2, 0))
 
         # Header cột canh gần đúng 2 Entry (mỗi Entry expand đều, chừa chỗ nút X ~26px)
         kw_cols = ttk.Frame(card_kw)
@@ -1073,6 +1244,14 @@ class AutomationApp:
         self.var_stage_filter = None
         self.var_stage_warn = None
         self._create_stage_tab()
+        # v1.5.7: tab "PHÂN BỔ CHỦ ĐỀ" — luôn tạo SAU stage để thứ tự tab ổn định.
+        # Chứa bảng profile ↔ chủ đề của lần phân bổ gần nhất (ephemeral — KHÔNG lưu app_config).
+        self._assignment_map = {}
+        self.assignment_frame = None
+        self.var_assignment_at = None
+        self._last_assignment_rows = []
+        self._last_assignment_at = ""
+        self._create_assignment_tab()
 
         # Sprint 1.1: khôi phục lựa chọn của phiên trước + tự lưu khi đóng app
         self._apply_loaded_config()
@@ -1504,6 +1683,19 @@ class AutomationApp:
     STAGE_FILTER_ALL = "Tất cả"
     STAGE_FILTER_NONE = "Chưa xác định"
 
+    # ── v1.5.7 — bảng phân bổ chủ đề (1 dòng = 1 profile, cột Chủ đề = thứ được chia đều)
+    ASSIGN_COLUMNS = ("name", "id", "group", "google", "yt", "round")
+    ASSIGN_HEADERS = {
+        "name": "Tài khoản",
+        "id": "ID",
+        "group": "Nhóm",
+        "google": "Chủ đề (Google)",
+        "yt": "Từ khóa (YouTube)",
+        "round": "Vòng",
+    }
+    ASSIGN_WIDTHS = {"name": 170, "id": 80, "group": 130, "google": 280, "yt": 220, "round": 56}
+    ASSIGN_NUM_COLS = ("round",)
+
     def _create_stage_tab(self):
         """Tạo (hoặc tạo lại) tab "GIAI ĐOẠN NGÂM". Luôn nằm CUỐI notebook (sau bảng
         thời lượng) nên công thức tabs()[slot_index + 1] của update_tab_name vẫn đúng.
@@ -1764,6 +1956,359 @@ class AutomationApp:
                 board_fn()
             except Exception:
                 pass
+
+    # ---------------- PHÂN BỔ CHỦ ĐỀ: tab + dialog xác nhận (v1.5.7) ----------------
+    def _create_assignment_tab(self):
+        """v1.5.7: tab "PHÂN BỔ CHỦ ĐỀ" — bảng hiện rõ profile nào chạy chủ đề nào.
+
+        Luôn add CUỐI cùng để phép tính `tabs()[slot_index + 1]` của update_tab_name
+        không đổi (notebook: MAIN, log, board, stage, assignment).
+        """
+        old = getattr(self, "assignment_frame", None)
+        if old is not None:
+            try:
+                old.destroy()
+            except Exception:
+                pass
+
+        frame = ttk.Frame(self.notebook)
+        self.notebook.add(frame, text=" PHÂN BỔ CHỦ ĐỀ ")
+        self.assignment_frame = frame
+
+        if self.var_assignment_at is None:
+            self.var_assignment_at = tk.StringVar(value="Chưa chạy phiên nào.")
+
+        bar = ttk.Frame(frame, padding=(10, 8, 10, 2))
+        bar.pack(fill="x")
+        ttk.Label(bar, textvariable=self.var_assignment_at, style="Muted.TLabel").pack(side="left")
+        ttk.Button(bar, text="Làm mới", command=self._refresh_assignment_tab).pack(side="right")
+
+        body = ttk.Frame(frame, padding=(10, 4, 10, 0))
+        body.pack(fill="both", expand=True)
+
+        cols = list(self.ASSIGN_COLUMNS)
+        tree = ttk.Treeview(body, columns=cols, show="headings", selectmode="browse")
+        for c in cols:
+            tree.heading(c, text=self.ASSIGN_HEADERS.get(c, c))
+            tree.column(
+                c,
+                width=self.ASSIGN_WIDTHS.get(c, 100),
+                anchor="center" if c in self.ASSIGN_NUM_COLS else "w",
+            )
+        ysb = ttk.Scrollbar(body, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=ysb.set)
+        ysb.pack(side="right", fill="y")
+        tree.pack(side="left", fill="both", expand=True)
+        self.assignment_tree = tree
+
+        ttk.Label(
+            frame,
+            text="1 dòng = 1 profile. Cột Chủ đề = chủ đề được chia đều ngẫu nhiên cho lần chạy sắp tới "
+                 "(nhập bao nhiêu chủ đề thì bot dùng bấy nhiêu chủ đề, không chỉ 1 chủ đề duy nhất).",
+            style="Muted.TLabel",
+            padding=(10, 6, 10, 8),
+        ).pack(fill="x")
+
+        self._assignment_refresh = self._refresh_assignment_tab
+        try:
+            self._refresh_assignment_tab()
+        except Exception as e:
+            print(f"[!] Không làm mới được bảng phân bổ: {e}")
+
+        def _auto():
+            try:
+                if frame.winfo_exists():
+                    self._refresh_assignment_tab()
+                    self.root.after(15000, _auto)
+            except Exception:
+                pass
+        self.root.after(15000, _auto)
+
+    def _refresh_assignment_tab(self):
+        """Vẽ lại bảng profile ↔ chủ đề của lần phân bổ gần nhất."""
+        tree = getattr(self, "assignment_tree", None)
+        if tree is None:
+            return
+        try:
+            tree.delete(*tree.get_children())
+        except Exception:
+            pass
+
+        rows = list(self._last_assignment_rows or [])
+        if not rows:
+            try:
+                self.var_assignment_at.set(
+                    "Chưa có phiên phân bổ nào — bấm BẮT ĐẦU CHẠY để xem bảng phân bổ."
+                )
+            except Exception:
+                pass
+            return
+
+        known = {r.get("id"): r for r in (self.profile_rows or [])}
+        for i, r in enumerate(rows):
+            pid = r.get("pid") or ""
+            group = (known.get(pid) or {}).get("group") or UNGROUPED_LABEL
+            try:
+                tree.insert(
+                    "", "end", iid=str(i),
+                    values=(
+                        self._profile_name_of(pid)[:42],
+                        pid[:8],
+                        group[:16],
+                        (r.get("google") or "")[:60],
+                        (r.get("yt") or "")[:48],
+                        r.get("round", ""),
+                    ),
+                )
+            except Exception:
+                pass
+
+        n_topics = len({
+            (r.get("google") or "").strip().lower()
+            for r in rows if (r.get("google") or "").strip()
+        })
+        try:
+            self.var_assignment_at.set(
+                f"Phiên {self._last_assignment_at} · {len(rows)} profile · "
+                f"{n_topics} chủ đề (chia đều ngẫu nhiên — xem cột Chủ đề)."
+            )
+        except Exception:
+            pass
+
+    def show_assignment_confirm(self, rows, pinned=False):
+        """Dialog chặn trước khi chạy: hiện rõ từng profile nhận chủ đề nào.
+
+        Modal có chủ đích (grab_set + wait_window) vì nó GATE phiên chạy — khác với
+        các dialog non-modal kiểu v1.4.8. Trả về True nếu người dùng bấm CHẠY.
+        """
+        result = {"ok": False}
+        win = tk.Toplevel(self.root)
+        win.title("Xác nhận phân bổ chủ đề")
+        win.configure(bg=self.C_CARD)
+        win.geometry("900x480")
+        win.minsize(720, 360)
+        try:
+            win.transient(self.root)
+            win.lift()
+        except Exception:
+            pass
+
+        rows = list(rows or [])
+        if pinned:
+            head = (
+                "GHIM CHỦ ĐỀ — mọi profile chạy cùng 1 chủ đề: "
+                f"{(rows[0].get('google') if rows else '') or '(chưa có)'}"
+            )
+        else:
+            n_topics = len({
+                (r.get("google") or "").strip().lower()
+                for r in rows if (r.get("google") or "").strip()
+            })
+            head = (
+                f"PHÂN BỔ {n_topics} CHỦ ĐỀ cho {len(rows)} PROFILE "
+                "(ngẫu nhiên, chia đều — không phải 1 chủ đề duy nhất):"
+            )
+        ttk.Label(win, text=head, padding=(12, 10, 12, 6)).pack(fill="x")
+
+        cols = list(self.ASSIGN_COLUMNS)
+        tree = ttk.Treeview(win, columns=cols, show="headings", selectmode="browse")
+        for c in cols:
+            tree.heading(c, text=self.ASSIGN_HEADERS.get(c, c))
+            tree.column(
+                c,
+                width=self.ASSIGN_WIDTHS.get(c, 100),
+                anchor="center" if c in self.ASSIGN_NUM_COLS else "w",
+            )
+        ysb = ttk.Scrollbar(win, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=ysb.set)
+        ysb.pack(side="right", fill="y")
+        tree.pack(side="left", fill="both", expand=True, padx=(12, 0), pady=4)
+
+        known = {r.get("id"): r for r in (self.profile_rows or [])}
+        for i, r in enumerate(rows):
+            pid = r.get("pid") or ""
+            group = (known.get(pid) or {}).get("group") or UNGROUPED_LABEL
+            try:
+                tree.insert(
+                    "", "end", iid=str(i),
+                    values=(
+                        self._profile_name_of(pid)[:42],
+                        pid[:8],
+                        group[:16],
+                        (r.get("google") or "")[:60],
+                        (r.get("yt") or "")[:48],
+                        r.get("round", ""),
+                    ),
+                )
+            except Exception:
+                pass
+
+        ttk.Label(
+            win,
+            text="Bấm CHẠY để chạy đúng bảng phân bổ trên, hoặc HỦY để bỏ qua phiên này.",
+            style="Muted.TLabel",
+            padding=(12, 6, 12, 4),
+        ).pack(fill="x")
+
+        btns = ttk.Frame(win, padding=(12, 4, 12, 12))
+        btns.pack(fill="x")
+
+        def _cancel():
+            result["ok"] = False
+            win.destroy()
+
+        def _ok():
+            result["ok"] = True
+            win.destroy()
+
+        ttk.Button(btns, text="HỦY", command=_cancel).pack(side="right", padx=(8, 0))
+        ttk.Button(btns, text="CHẠY", style="Start.TButton", command=_ok).pack(side="right")
+        win.protocol("WM_DELETE_WINDOW", _cancel)
+        try:
+            win.grab_set()
+        except Exception:
+            pass
+        win.wait_window()
+        return bool(result["ok"])
+
+    # ---------------- v1.5.7: SINH CHỦ ĐỀ TỪ CHỦ ĐỀ GỐC ----------------
+    def on_generate_topics(self):
+        """Sinh N chủ đề con từ 'Chủ đề gốc' (N = số profile đang chọn) rồi mở bảng xem trước.
+
+        AI được gọi trong thread nền (network -> tránh treo Tk). Không bật AI / AI lỗi thì
+        tự dùng mẫu offline (generate_topics_from_seed với brain=None vẫn ra đủ N).
+        """
+        seed = self._pinned_theme_text()
+        if not seed:
+            messagebox.showinfo(
+                "Chủ đề gốc",
+                "Hãy gõ 1 chủ đề gốc vào ô 'Chủ đề gốc' trước khi bấm Sinh chủ đề.",
+            )
+            return
+        profiles = [r["id"] for r in self.profile_rows
+                    if r["var"].get() and not r["firefox"] and not r.get("hidden", False)]
+        n = len(profiles)
+        if n <= 0:
+            messagebox.showinfo(
+                "Chưa chọn profile",
+                "Hãy tick chọn ít nhất 1 tài khoản (đang hiện) để biết cần sinh bao nhiêu chủ đề.",
+            )
+            return
+        brain_type = self.var_brain_type.get()
+        self.btn_gen_topics.config(state="disabled", text="Đang sinh...")
+
+        # Worker CHỈ tính toán (AI/offline) rồi đặt kết quả vào holder. MỌI thao tác Tk
+        # (mở dialog, bật lại nút) do MAIN thread làm qua _poll_generated — vì gọi root.after
+        # từ thread nền sẽ TREO (Tk không thread-safe). Poller được lên lịch từ main thread.
+        self._gen_result = {"done": False}
+
+        def _work():
+            brain = None
+            if brain_type and brain_type != "none":
+                try:
+                    brain = BrainManager.get_brain(brain_type)
+                except Exception as e:
+                    print(f"[!] Không khởi tạo được AI Brain '{brain_type}' ({e}) - sinh bằng mẫu offline.")
+                    brain = None
+            try:
+                topics = generate_topics_from_seed(seed, n, brain=brain)
+            except Exception as e:
+                print(f"[!] Lỗi sinh chủ đề ({e}) - dùng mẫu offline.")
+                topics = generate_topics_from_seed(seed, n, brain=None)
+            self._gen_result["topics"] = topics
+            self._gen_result["seed"] = seed
+            self._gen_result["done"] = True
+
+        threading.Thread(target=_work, daemon=True).start()
+        self.root.after(120, self._poll_generated)
+
+    def _poll_generated(self):
+        """Chạy trên MAIN thread: chờ worker sinh xong rồi mở bảng xem trước."""
+        res = getattr(self, "_gen_result", None) or {}
+        if not res.get("done"):
+            self.root.after(120, self._poll_generated)
+            return
+        self._after_generate_topics(res.get("seed", ""), res.get("topics", []))
+
+    def _after_generate_topics(self, seed, topics):
+        """Chạy trên main thread: bật lại nút + mở bảng xem trước."""
+        try:
+            self.btn_gen_topics.config(state="normal", text="Sinh chủ đề (theo số profile)")
+        except Exception:
+            pass
+        if not topics:
+            messagebox.showwarning("Sinh chủ đề", "Không sinh được chủ đề nào. Hãy thử lại.")
+            return
+        self._show_generated_topics_preview(seed, topics)
+
+    def _show_generated_topics_preview(self, seed, topics):
+        """Xem trước N chủ đề vừa sinh; Áp dụng -> đổ vào danh sách CHỦ ĐỀ XUYÊN SUỐT."""
+        win = tk.Toplevel(self.root)
+        win.title("Xem trước chủ đề vừa sinh")
+        win.configure(bg=self.C_CARD)
+        win.geometry("760x480")
+        win.minsize(560, 320)
+        try:
+            win.transient(self.root)
+            win.lift()
+        except Exception:
+            pass
+
+        ttk.Label(
+            win,
+            text=f"Chủ đề gốc: {seed}  →  {len(topics)} chủ đề con (mỗi profile 1 chủ đề, có random):",
+            padding=(12, 10, 12, 6),
+        ).pack(fill="x")
+
+        body = ttk.Frame(win, padding=(12, 0, 12, 0))
+        body.pack(fill="both", expand=True)
+        cols = ("stt", "google", "yt")
+        tree = ttk.Treeview(body, columns=cols, show="headings", selectmode="browse")
+        tree.heading("stt", text="#")
+        tree.heading("google", text="Chủ đề (Google)")
+        tree.heading("yt", text="Từ khóa (YouTube)")
+        tree.column("stt", width=44, anchor="center")
+        tree.column("google", width=360, anchor="w")
+        tree.column("yt", width=300, anchor="w")
+        ysb = ttk.Scrollbar(body, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=ysb.set)
+        ysb.pack(side="right", fill="y")
+        tree.pack(side="left", fill="both", expand=True)
+        for i, t in enumerate(topics, 1):
+            tree.insert("", "end", values=(i, (t.get("google_query") or "")[:70],
+                                           (t.get("youtube_query") or "")[:60]))
+
+        ttk.Label(
+            win,
+            text="Áp dụng = đổ danh sách này vào 'CHỦ ĐỀ XUYÊN SUỐT' (thay nội dung cũ). "
+                 "Khi bấm BẮT ĐẦU CHẠY, mỗi profile sẽ nhận 1 chủ đề (xem tab PHÂN BỔ CHỦ ĐỀ).",
+            style="Muted.TLabel",
+            padding=(12, 6, 12, 4),
+        ).pack(fill="x")
+
+        btns = ttk.Frame(win, padding=(12, 4, 12, 12))
+        btns.pack(fill="x")
+
+        def _apply():
+            g_list = [t.get("google_query", "") for t in topics]
+            y_list = [t.get("youtube_query", "") for t in topics]
+            self._rebuild_kw_rows(g_list, y_list)
+            self.var_pinned_theme.set("")  # đã đổ vào danh sách -> không ghim nữa
+            try:
+                self.save_current_config()
+            except Exception:
+                pass
+            print(f"[+] Đã áp dụng {len(topics)} chủ đề sinh từ '{seed}' vào danh sách chủ đề.")
+            win.destroy()
+
+        def _regen():
+            win.destroy()
+            self.on_generate_topics()
+
+        ttk.Button(btns, text="Hủy", command=win.destroy).pack(side="right", padx=(8, 0))
+        ttk.Button(btns, text="Sinh lại", command=_regen).pack(side="right", padx=(8, 0))
+        ttk.Button(btns, text="Áp dụng", style="Start.TButton", command=_apply).pack(side="right")
+        win.protocol("WM_DELETE_WINDOW", win.destroy)
 
     def show_stage_board(self):
         """Nút "GIAI ĐOẠN NGÂM" ở card điều khiển: chọn tab giai đoạn rồi làm mới ngay."""
@@ -3457,6 +4002,40 @@ clearly tách nhóm hơn kiểu label trần + separator."""
             ):
                 return
 
+        # ── v1.5.7 — PHÂN BỔ CHỦ ĐỀ CHO TỪNG PROFILE (trước khi mở thread) ──────────
+        # Người dùng nhập N chủ đề ở card "CHỦ ĐỀ XUYÊN SUỐT" → app chia đều N chủ đề
+        # cho các profile đang chạy (round-robin, mỗi vòng reshuffle — có random thật).
+        # Nếu đang GHIM chủ đề (pinned_theme) thì cả list dùng chung 1 chủ đề đó.
+        pin_now = self._pinned_theme_text()
+        if pin_now:
+            _pinned_topic = {"google_query": pin_now, "youtube_query": pin_now}
+            assignment_map = {pid: dict(_pinned_topic) for pid in profiles}
+            assign_rows = [
+                {"pid": pid, "google": pin_now, "yt": pin_now, "round": i + 1}
+                for i, pid in enumerate(profiles)
+            ]
+        else:
+            _themes_now = list(self._collect_kw_pairs())
+            assignment_map, assign_rows = assign_topics_for_run(profiles, _themes_now)
+
+        # Lưu vào instance để worker_wrapper đọc (KHÔNG thêm tham số — test_v153
+        # vẫn pin đúng chuỗi 'pinned_theme)' là tham số cuối của Thread/submit).
+        self._assignment_map = assignment_map
+        self._last_assignment_rows = assign_rows
+        self._last_assignment_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self._refresh_assignment_tab()
+        self.save_current_config()
+
+        # Hộp thoại hiện BẢNG PHÂN BỔ cho người dùng xác nhận trước khi chạy
+        if not self.show_assignment_confirm(assign_rows, pinned=bool(pin_now)):
+            # Người dùng HỦY — chưa bật widget nào, chưa clear STOP_EVENT → về trạng thái ban đầu
+            self._assignment_map = {}
+            self._last_assignment_rows = []
+            self._last_assignment_at = ""
+            self._refresh_assignment_tab()
+            return
+
+        # ── v1.5.7 — hết block phân bổ ─────────────────────────────────────────────
         STOP_EVENT.clear()  # phiên mới: xóa cờ dừng của lần trước
 
         self.btn_start.config(state="disabled", text="ĐANG CHẠY...")
@@ -3468,7 +4047,7 @@ clearly tách nhóm hơn kiểu label trần + separator."""
                     self.btn_refresh_profiles, self.btn_add_manual,
                     self.btn_dashboard, self.btn_export_csv, self.btn_timeline,
                     self.btn_phase_info, self.btn_cycle_time, self.btn_api_keys,
-                    self.btn_stage, self.btn_telegram):
+                    self.btn_stage, self.btn_telegram, self.btn_gen_topics):
             btn.config(state="disabled")
         
         for tab_name in list(self.log_boxes.keys()):
@@ -3487,6 +4066,8 @@ clearly tách nhóm hơn kiểu label trần + separator."""
         self._create_board_tab()
         # v1.5.0: nối lại tab giai đoạn ngay sau bảng thời lượng (giữ đúng thứ tự tab)
         self._create_stage_tab()
+        # v1.5.7: tab PHÂN BỔ CHỦ ĐỀ — nối SAU stage (nhất quán với __init__)
+        self._create_assignment_tab()
 
         self._running = True
         self._active_slots = list(range(n_slots))
@@ -3525,7 +4106,13 @@ clearly tách nhóm hơn kiểu label trần + separator."""
         if pinned_theme:
             print(f"[System] Chủ đề GHIM: {pinned_theme} (bỏ qua danh sách chủ đề của phiên)")
         else:
-            print("[System] Chủ đề: bot tự chọn 1 chủ đề trong danh sách cho mỗi profile")
+            # v1.5.7: nếu start_automation đã phân bổ chủ đề cho từng profile thì báo đúng như vậy
+            _amap = getattr(self, "_assignment_map", None) or {}
+            if _amap:
+                print(f"[System] Chủ đề: đã PHÂN BỔ {len(set((t or {}).get('google_query', '') for t in _amap.values()))} "
+                      f"chủ đề cho {len(_amap)} profile (ngẫu nhiên — xem tab PHÂN BỔ CHỦ ĐỀ)")
+            else:
+                print("[System] Chủ đề: bot tự chọn 1 chủ đề trong danh sách cho mỗi profile")
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [executor.submit(worker_wrapper, self, pid, themes, slots_queue, screen_w, screen_h, skip_youtube, skip_random_keywords, browser_type, api_port, brain_type, phase, fixed_target_s, daily_seconds, pinned_theme) for pid in profiles]
@@ -4156,7 +4743,7 @@ clearly tách nhóm hơn kiểu label trần + separator."""
                     self.btn_refresh_profiles, self.btn_add_manual,
                     self.btn_dashboard, self.btn_export_csv, self.btn_timeline,
                     self.btn_phase_info, self.btn_cycle_time, self.btn_api_keys,
-                    self.btn_stage, self.btn_telegram):
+                    self.btn_stage, self.btn_telegram, self.btn_gen_topics):
             btn.config(state=state)
 
     def _apply_log_filter(self):
