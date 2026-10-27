@@ -2800,8 +2800,20 @@ class WarmupWorkflow:
                     self._log_activity(page, chosen_action_name, status=_status,
                                        duration_s=round(time.time() - _t0, 1), error=_err)
             
-            # Nghỉ giữa 2 hành động, nhưng responsive với Stop + trần thời gian phiên
-            sleep_end = time.time() + random.uniform(5, 10)
+            # v1.5.8: NGHỈ GIỮA 2 HÀNH ĐỘNG — chuẩn hóa theo nhịp người thật. Bản cũ chỉ 5-10s
+            # nên các tác vụ nhanh (thời tiết/tài chính/tìm kiếm) dồn 2-3 activity trong 1 phút,
+            # nhìn rõ là bot. Người thật đổi tác vụ thì nghỉ lâu hơn + biến thiên (phần lớn nghỉ
+            # vừa, thỉnh thoảng lướt nhanh, thỉnh thoảng phân tâm/rời máy một lúc).
+            roll = random.random()
+            if roll < 0.15:
+                rest_s = random.uniform(10, 20)      # lướt nhanh sang việc kế
+            elif roll < 0.85:
+                rest_s = random.uniform(25, 60)      # nghỉ bình thường giữa 2 tác vụ
+            else:
+                rest_s = random.uniform(80, 160)     # bị phân tâm / rời máy một lúc
+            print(f"      + Nghỉ ~{rest_s:.0f}s trước khi chuyển hành động (kiểu người thật)...")
+            # Responsive với Stop + trần thời gian phiên (poll 0.5s, chạm deadline thì dừng ngay)
+            sleep_end = time.time() + rest_s
             while time.time() < sleep_end and not self.stop_requested:
                 time.sleep(0.5)
                 if time.time() - session_t0 >= deadline_s:
