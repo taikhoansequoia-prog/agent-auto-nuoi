@@ -2327,8 +2327,34 @@ class AutomationApp:
             )
         ttk.Label(win, text=head, padding=(12, 10, 12, 6)).pack(fill="x")
 
+        # v1.6.9 FIX "không chạy được": nút CHẠY/HỦY + dòng hướng dẫn PHẢI pack
+        # side="bottom" TRƯỚC khi pack bảng. Trước đây Treeview pack side="left" +
+        # expand=True nuốt sạch khoảng trống của cửa sổ -> dòng hint và khung nút
+        # bị map với kích thước 1x1 (mapped=0) = VÔ HÌNH, người dùng không thấy/không
+        # bấm được CHẠY, mà dialog lại grab_set (modal) nên cả app như "treo".
+        def _cancel():
+            result["ok"] = False
+            win.destroy()
+
+        def _ok():
+            result["ok"] = True
+            win.destroy()
+
+        btns = ttk.Frame(win, padding=(12, 4, 12, 12))
+        btns.pack(side="bottom", fill="x")
+        ttk.Button(btns, text="HỦY", command=_cancel).pack(side="right", padx=(8, 0))
+        ttk.Button(btns, text="CHẠY", style="Start.TButton", command=_ok).pack(side="right")
+        ttk.Label(
+            win,
+            text="Bấm CHẠY để chạy đúng bảng phân bổ trên, hoặc HỦY để bỏ qua phiên này.",
+            style="Muted.TLabel",
+            padding=(12, 6, 12, 4),
+        ).pack(side="bottom", fill="x")
+
+        body = ttk.Frame(win)
+        body.pack(side="top", fill="both", expand=True, padx=12, pady=4)
         cols = list(self.ASSIGN_COLUMNS)
-        tree = ttk.Treeview(win, columns=cols, show="headings", selectmode="browse")
+        tree = ttk.Treeview(body, columns=cols, show="headings", selectmode="browse")
         for c in cols:
             tree.heading(c, text=self.ASSIGN_HEADERS.get(c, c))
             tree.column(
@@ -2336,10 +2362,10 @@ class AutomationApp:
                 width=self.ASSIGN_WIDTHS.get(c, 100),
                 anchor="center" if c in self.ASSIGN_NUM_COLS else "w",
             )
-        ysb = ttk.Scrollbar(win, orient="vertical", command=tree.yview)
+        ysb = ttk.Scrollbar(body, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=ysb.set)
         ysb.pack(side="right", fill="y")
-        tree.pack(side="left", fill="both", expand=True, padx=(12, 0), pady=4)
+        tree.pack(side="left", fill="both", expand=True)
 
         known = {r.get("id"): r for r in (self.profile_rows or [])}
         for i, r in enumerate(rows):
@@ -2360,26 +2386,6 @@ class AutomationApp:
             except Exception:
                 pass
 
-        ttk.Label(
-            win,
-            text="Bấm CHẠY để chạy đúng bảng phân bổ trên, hoặc HỦY để bỏ qua phiên này.",
-            style="Muted.TLabel",
-            padding=(12, 6, 12, 4),
-        ).pack(fill="x")
-
-        btns = ttk.Frame(win, padding=(12, 4, 12, 12))
-        btns.pack(fill="x")
-
-        def _cancel():
-            result["ok"] = False
-            win.destroy()
-
-        def _ok():
-            result["ok"] = True
-            win.destroy()
-
-        ttk.Button(btns, text="HỦY", command=_cancel).pack(side="right", padx=(8, 0))
-        ttk.Button(btns, text="CHẠY", style="Start.TButton", command=_ok).pack(side="right")
         win.protocol("WM_DELETE_WINDOW", _cancel)
         try:
             win.grab_set()
