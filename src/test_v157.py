@@ -312,9 +312,10 @@ if win is not None:
     if btn_apply is not None:
         btn_apply.invoke()
         ui_root.update()
-        g_in_rows = [r["g"].get().strip().lower() for r in app.kw_rows]
-        check("Áp dụng -> kw_rows có đúng 3 dòng", len(app.kw_rows) == 3, str(len(app.kw_rows)))
-        check("kw_rows chứa đúng chủ đề đã sinh",
+        _pairs = app._collect_kw_pairs()  # v1.6.6: nguồn là ô Text, đọc qua _collect_kw_pairs
+        g_in_rows = [(p["google_query"] or "").strip().lower() for p in _pairs]
+        check("Áp dụng -> danh sách chủ đề có đúng 3 dòng", len(_pairs) == 3, str(len(_pairs)))
+        check("danh sách chứa đúng chủ đề đã sinh",
               set(g_in_rows) == set(goods(topics3)), str(g_in_rows))
         check("ô 'Chủ đề gốc' đã được CLEAR sau Áp dụng (không còn ghim)",
               app._pinned_theme_text() == "", repr(app._pinned_theme_text()))
@@ -389,6 +390,37 @@ check("on_generate_topics tự dò brain khi 'none'",
       "_detect_brain_type_from_env()" in src and "auto_pick" in src)
 check("worker gom log vào list (không print chéo luồng)",
       "logs.append" in src and "log=logs.append" in src)
+
+# =====================================================================
+hr("6. v1.6.8 — chống treo 'Sinh chủ đề' (Gemini timeout + hàng rào deadline UI)")
+
+# (a) Gemini ask_text có timeout per-call (fail-fast thay vì treo 80s+).
+_gem = read_src("agent/gemini_brain.py")
+_ask = _gem.split("def ask_text")[1].split("def ", 1)[0]
+check("gemini_brain: ask_text truyền request_options timeout",
+      "request_options" in _ask and "timeout" in _ask)
+check("gemini_brain: có hằng số _GEMINI_TIMEOUT_S (env override)",
+      "_GEMINI_TIMEOUT_S" in _gem and "GEMINI_TIMEOUT" in _gem)
+
+# (b) _poll_generated có hàng rào deadline + one-shot để không chờ vô hạn.
+_poll = src.split("def _poll_generated")[1].split("\n    def ", 1)[0]
+check("_poll_generated: dùng _gen_deadline", "_gen_deadline" in _poll)
+check("_poll_generated: cờ one-shot _gen_finished", "_gen_finished" in _poll)
+check("_poll_generated: nhánh deadline dựng offline (brain=None)",
+      "generate_topics_from_seed" in _poll and "brain=None" in _poll)
+check("on_generate_topics: lưu ngữ cảnh cho nhánh deadline",
+      "_gen_seed" in src and "_gen_token" in src)
+
+# (c) fail-fast -> offline: brain trả rỗng (giả lập Gemini timeout) vẫn ra đủ N.
+class _EmptyBrain:
+    def ask_text(self, p):
+        return ""  # như ask_text khi generate_content raise/timeout
+
+
+_tp = gen("đi bộ", 4, brain=_EmptyBrain())
+check("brain trả rỗng (timeout) -> vẫn ra đủ N offline", len(_tp) == 4, str(len(_tp)))
+check("offline topics có google_query phân biệt",
+      len({t["google_query"].lower() for t in _tp}) == 4)
 
 # =====================================================================
 print("\n" + "=" * 70)

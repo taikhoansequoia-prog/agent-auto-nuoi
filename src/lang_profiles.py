@@ -51,6 +51,21 @@ TOPIC_TEMPLATES = {
 }
 DEFAULT_SEED = {"vi": "chủ đề thời sự", "en": "daily life", "ja": "日常生活", "ko": "일상생활"}
 
+# ---- Pool CHỦ ĐỀ NỀN đời sống (dùng khi user để trống ô gốc + bấm Sinh) ----
+# Mỗi lần Sinh bốc ngẫu nhiên 1 chủ đề -> AI bung ra N chủ đề con quanh nó,
+# nên "để trống = bot tự chọn" mỗi lần ra một mảng khác nhau.
+SEED_POOL = {
+    "vi": ("đi bộ thể dục", "nấu ăn tại nhà", "chăm sóc da", "cà phê", "du lịch tiết kiệm",
+           "tập gym tại nhà", "trồng cây cảnh", "đọc sách", "chạy bộ", "ăn uống lành mạnh"),
+    "en": ("walking for fitness", "home cooking", "skincare routine", "coffee brewing",
+           "budget travel", "home workout", "indoor plants", "reading books",
+           "running", "healthy eating"),
+    "ja": ("ウォーキング", "家庭料理", "スキンケア", "コーヒー", "節約旅行",
+           "宅トレ", "観葉植物", "読書", "ランニング", "健康的な食事"),
+    "ko": ("걷기 운동", "집밥 요리", "스킨케어", "커피", "가성비 여행",
+           "홈트레이닝", "실내 식물", "독서", "달리기", "건강한 식단"),
+}
+
 # ---- Pool BƯỚC KẾ HOẠCH offline (platform, template {s}) ----
 PLAN_POOL = {
     "vi": [("google", "{s}"), ("google", "cách {s}"), ("news", "tin tức {s}"), ("wikipedia", "{s}"),
@@ -126,6 +141,18 @@ def topic_templates(lang):
 
 def default_seed(lang):
     return DEFAULT_SEED[norm(lang)]
+
+
+def random_seed(lang, rng=None):
+    """v1.6.6: bốc ngẫu nhiên 1 chủ đề nền đời sống theo ngôn ngữ (cho 'để trống + Sinh').
+    rng=None -> dùng random global. Fallback DEFAULT_SEED nếu pool trống/lỗi."""
+    import random as _r
+    rng = rng or _r
+    pool = SEED_POOL.get(norm(lang)) or ()
+    try:
+        return rng.choice(pool) if pool else default_seed(lang)
+    except Exception:
+        return default_seed(lang)
 
 
 def plan_pool(lang):

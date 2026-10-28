@@ -341,9 +341,9 @@ check("PHASE_DETAILS không còn TikTok 0.45", '("Xem TikTok", 0.45' not in ui)
 check("notes nói trần 15-30 phút", ui.count("15-30 phút") >= 2, str(ui.count("15-30 phút")))
 check("notes nói kế hoạch 8-14 bước", ui.count("8-14 bước") >= 2, str(ui.count("8-14 bước")))
 check("card từ khóa đổi nhãn CHỦ ĐỀ XUYÊN SUỐT", "CHỦ ĐỀ XUYÊN SUỐT" in ui)
-check("nút '+ Thêm chủ đề'", '"+ Thêm chủ đề"' in ui)
-check("giữ attrs kw_rows / _collect_kw_pairs (config không vỡ)",
-      "self.kw_rows" in ui and "_collect_kw_pairs" in ui)
+check("v1.6.6: ô Text nhiều dòng (self.kw_text) thay danh sách row", "self.kw_text" in ui)
+check("giữ _collect_kw_pairs (config không vỡ)",
+      "_collect_kw_pairs" in ui)
 check("giữ total_actions randint(4, 8) (test_v141 coupling)",
       "total_actions = random.randint(4, 8)" in ui)
 

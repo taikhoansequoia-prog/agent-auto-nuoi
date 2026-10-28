@@ -900,6 +900,10 @@ class AutomationApp:
         # ---- Khung & nhãn ----
         style.configure("TFrame", background=CD)
         style.configure("Outer.TFrame", background=B)
+        # v1.6.7: khung chia kéo được — thanh chia dày 8px, có gờ cầm cho dễ thấy/kéo
+        style.configure("Main.TPanedwindow", background=B)
+        style.configure("Sash", sashthickness=8, gripcount=16,
+                        background=SC, lightcolor=SC, darkcolor=SC)
         style.configure("TLabel", background=CD, foreground=T)
         style.configure("Outer.TLabel", background=B, foreground=T)
         style.configure("Muted.TLabel", background=CD, foreground=M)
@@ -1023,10 +1027,11 @@ class AutomationApp:
         # vẫn kéo xuống tới ô nhập "CHỦ ĐỀ XUYÊN SUỐT" ở cuối app. Root chuyển sang grid:
         # hàng 0 header, 1 viền, 2 vùng cấu hình (cuộn), 3 khung log, 4 status bar.
         root.columnconfigure(0, weight=1)
-        # v1.6.3: 7 hàng — 0 header · 1 viền · 2 thanh công cụ (menu) · 3 vùng cấu hình (cuộn)
-        # · 4 dải CHỦ ĐỀ/TỪ KHÓA (GHIM — luôn hiện) · 5 khung log · 6 status bar.
-        root.rowconfigure(3, weight=2)  # vùng cấu hình cuộn (ưu tiên: setup quan trọng hơn log)
-        root.rowconfigure(5, weight=1)  # khung log
+        # v1.6.7: 5 hàng — 0 header · 1 viền · 2 thanh công cụ · 3 KHUNG CHIA KÉO ĐƯỢC
+        # (cấu hình cuộn | chủ đề | log) · 4 status bar. Trước đây 3 vùng là 3 hàng grid cao
+        # cố định tranh chỗ nhau -> màn thấp thì danh sách profile bị ép còn vài dòng và ô chủ
+        # đề bị cắt mất. Giờ user kéo 2 thanh chia, vị trí được nhớ trong config (pane_sash).
+        root.rowconfigure(3, weight=1)
         hdr = tk.Frame(root, bg=self.C_HEADER_BG, height=58)
         hdr.grid(row=0, column=0, sticky="ew")
         hdr.pack_propagate(False)
@@ -1084,9 +1089,22 @@ class AutomationApp:
                                    variable=self.var_log_errors, command=self._apply_log_filter)
         self.mbtn_tools["menu"] = menu_tools
 
+        # --- v1.6.7: khung chia dọc kéo được — 3 ngăn: cấu hình | chủ đề | log ---
+        self.main_pane = ttk.Panedwindow(root, orient="vertical", style="Main.TPanedwindow")
+        self.main_pane.grid(row=3, column=0, sticky="nsew")
+        # Bộ cuộn chuột TOÀN CỤC (1 lần): cuộn đúng vùng dưới con trỏ, kể cả khi trỏ trên
+        # checkbox/ô nhập. Canvas cuộn đăng ký vào _wheel_targets (xem _make_scrollable).
+        self._wheel_targets = set()
+        root.bind_all("<MouseWheel>", self._on_global_wheel)
+        # Lăn chuột trên Combobox/Spinbox mặc định ĐỔI GIÁ TRỊ (lỡ tay đổi Chế độ ngâm,
+        # Số luồng... khi cuộn trang). Vô hiệu: binding lớp rỗng -> sự kiện đi tiếp tới
+        # _on_global_wheel nên vẫn cuộn trang bình thường.
+        for _cls in ("TCombobox", "TSpinbox"):
+            root.bind_class(_cls, "<MouseWheel>", lambda e: None)
+
         # --- v1.6.2: vùng cấu hình bọc trong canvas cuộn dọc (header/toolbar/log/status ghim) ---
-        body_wrap = ttk.Frame(root, style="Outer.TFrame")
-        body_wrap.grid(row=3, column=0, sticky="nsew")
+        body_wrap = ttk.Frame(self.main_pane, style="Outer.TFrame")
+        self.main_pane.add(body_wrap, weight=3)
         body_wrap.rowconfigure(0, weight=1)
         body_wrap.columnconfigure(0, weight=1)
         # height=330: vùng cấu hình đòi ~330px để không bị khung log (natural cao) nuốt chỗ;
@@ -1105,11 +1123,11 @@ class AutomationApp:
         self.body_canvas.bind("<Configure>", lambda e: self.body_canvas.itemconfigure(
             _body_win, width=e.width))
 
-        def _body_wheel(event):
-            self.body_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-        # bind_all khi trỏ vào vùng cấu hình; rời ra thì nhả (log/các canvas con tự xử lý)
-        self.body_canvas.bind("<Enter>", lambda e: self.body_canvas.bind_all("<MouseWheel>", _body_wheel))
-        self.body_canvas.bind("<Leave>", lambda e: self.body_canvas.unbind_all("<MouseWheel>"))
+        # v1.6.7: cuộn chuột do _on_global_wheel xử lý (không còn bind_all/unbind_all theo hover
+        # — kiểu cũ bị nhả ngay khi con trỏ đi vào checkbox/ô nhập con => "không kéo được").
+        self._wheel_targets.add(self.body_canvas)
+        # Danh sách profile cao theo ngăn trên: kéo thanh chia xuống = thấy nhiều acc hơn.
+        self.body_canvas.bind("<Configure>", self._fit_profile_list, add="+")
 
         # --- Lưới 2 cột: trái = checklist (trục chính), phải = cấu hình + điều khiển ---
         outer = ttk.Frame(body_inner, style="Outer.TFrame")
@@ -1151,6 +1169,8 @@ class AutomationApp:
         prof_box = ttk.Frame(card_prof)
         prof_box.pack(fill="both", expand=True, pady=(4, 2))
         self.prof_canvas, self.prof_inner = self._make_scrollable(prof_box, 240)
+        self._card_prof = card_prof  # v1.6.7: đo phần đầu thẻ để danh sách giãn theo ngăn trên
+        self._prof_overhead = None
         # v1.3.6: mỗi dòng thêm "group" (tên nhóm GPM, "" = chưa có) + "hidden" (lọc đang ẩn)
         self.profile_rows = []  # [{"id", "name", "firefox", "var", "frame", "group", "hidden"}]
         self._group_headers = {}  # tên nhóm -> {"group", "frame", "count"} (label header)
@@ -1289,64 +1309,80 @@ class AutomationApp:
         # ---------- Thẻ ngang dưới: hạt giống chủ đề (v1.5.2: không còn là cặp điều khiển phiên) ----------
         # v1.6.3: dải CHỦ ĐỀ/TỪ KHÓA GHIM ở root row 4 (NGOÀI vùng cuộn) — LUÔN hiển thị,
         # full-width cả cửa sổ, không còn bị đẩy xuống đáy khối cấu hình.
-        card_kw = ttk.Labelframe(root, text="  CHỦ ĐỀ XUYÊN SUỐT — HẠT GIỐNG CHO AI BRAIN  ", padding=(12, 8))
-        card_kw.grid(row=4, column=0, sticky="ew", padx=12, pady=(0, 4))
-        kw_head = ttk.Frame(card_kw)
-        kw_head.pack(fill="x")
-        ttk.Label(kw_head, text="Mỗi dòng 1 chủ đề · AI sinh từ khóa liên quan thực tế theo NGÔN NGỮ chọn bên dưới · 8-14 bước nối nhau · phiên 15-30 phút",
-                  style="Muted.TLabel").pack(side="left")
-        ttk.Button(kw_head, text="+ Thêm chủ đề", command=lambda: self._add_kw_row("", "", focus=True),
-                   style="Tool.TButton", width=14).pack(side="right")
+        # v1.6.7: thẻ là NGĂN GIỮA của khung chia kéo được (không còn hàng grid cố định bị
+        # cắt mất khi cửa sổ thấp). Gọn lại: ngôn ngữ + chủ đề gốc chung 1 hàng, hint tự xuống dòng.
+        kw_holder = ttk.Frame(self.main_pane, style="Outer.TFrame", padding=(12, 4, 12, 2))
+        self.main_pane.add(kw_holder, weight=1)
+        card_kw = ttk.Labelframe(kw_holder, text="  CHỦ ĐỀ XUYÊN SUỐT — HẠT GIỐNG CHO AI BRAIN  ", padding=(12, 6))
+        card_kw.pack(fill="both", expand=True)
+
+        def _wrap_label(lbl):
+            # nhãn dài tự xuống dòng theo bề rộng thẻ thay vì bị cắt ở mép phải
+            lbl.bind("<Configure>", lambda e: lbl.configure(wraplength=max(200, e.width - 4)))
+            return lbl
 
         # v1.6.1: NÚT CHỌN NGÔN NGỮ TỪ KHÓA (Việt / Anh / Nhật / Hàn) — chi phối cả
         # "Sinh chủ đề" lẫn runtime (plan + đọc báo + thời tiết + mẫu offline).
-        lang_line = ttk.Frame(card_kw)
-        lang_line.pack(fill="x", pady=(6, 0))
-        ttk.Label(lang_line, text="Ngôn ngữ từ khóa:").pack(side="left")
-        self.var_kw_lang = tk.StringVar(value=lang_profiles.norm(self.cfg.get("keyword_lang", "en")))
-        for _code in lang_profiles.LANG_CODES:
-            ttk.Radiobutton(lang_line, text=lang_profiles.LANG_LABELS[_code],
-                            value=_code, variable=self.var_kw_lang,
-                            command=self._on_kw_lang_changed).pack(side="left", padx=(10, 0))
-
         # v1.5.7: CHỦ ĐỀ GỐC — gõ 1 chủ đề rồi bấm "Sinh chủ đề" để AI tạo mỗi profile 1 chủ đề
         # con (có random) -> xem trước -> áp dụng vào danh sách bên dưới. KHÔNG bấm Sinh mà vẫn
         # để chữ ở đây = GHIM: mọi profile chạy đúng chủ đề này (hành vi v1.5.3 giữ nguyên —
         # biến var_pinned_theme + plumbing pinned_theme KHÔNG đổi).
         pin_line = ttk.Frame(card_kw)
-        pin_line.pack(fill="x", pady=(6, 0))
-        ttk.Label(pin_line, text="Chủ đề gốc:").pack(side="left")
+        pin_line.pack(fill="x")
+        ttk.Label(pin_line, text="Ngôn ngữ:").pack(side="left")
+        self.var_kw_lang = tk.StringVar(value=lang_profiles.norm(self.cfg.get("keyword_lang", "en")))
+        for _code in lang_profiles.LANG_CODES:
+            ttk.Radiobutton(pin_line, text=lang_profiles.LANG_LABELS[_code],
+                            value=_code, variable=self.var_kw_lang,
+                            command=self._on_kw_lang_changed).pack(side="left", padx=(8, 0))
+        ttk.Label(pin_line, text="Chủ đề gốc:").pack(side="left", padx=(18, 0))
         self.var_pinned_theme = tk.StringVar(value="")
         self.ent_pinned_theme = ttk.Entry(pin_line, textvariable=self.var_pinned_theme)
         self.ent_pinned_theme.pack(side="left", fill="x", expand=True, padx=(6, 6))
         self.btn_gen_topics = ttk.Button(pin_line, text="Sinh chủ đề (theo số profile)",
                                          command=self.on_generate_topics, style="Tool.TButton", width=26)
         self.btn_gen_topics.pack(side="left")
-        ttk.Label(
+        _wrap_label(ttk.Label(
             card_kw,
-            text="'Sinh chủ đề' = AI tạo mỗi profile 1 chủ đề con (xem trước → áp dụng). "
-                 "Để trống = bot tự chọn · để chữ mà bấm CHẠY (không Sinh) = ghim mọi profile dùng chủ đề này.",
-            style="Muted.TLabel",
-        ).pack(fill="x", pady=(2, 0))
+            text="Sinh = AI tạo mỗi profile 1 chủ đề con (xem trước → áp dụng). "
+                 "Để TRỐNG ô gốc + bấm Sinh = bot tự chọn chủ đề nền. "
+                 "Để chữ ô gốc + bấm CHẠY (không Sinh) = ghim mọi profile vào đúng chủ đề đó.",
+            style="Muted.TLabel", justify="left",
+        )).pack(fill="x", pady=(3, 0))
 
-        # Header cột canh gần đúng 2 Entry (mỗi Entry expand đều, chừa chỗ nút X ~26px)
-        kw_cols = ttk.Frame(card_kw)
-        kw_cols.pack(fill="x", pady=(6, 1))
-        ttk.Label(kw_cols, text="CHỦ ĐỀ (GOOGLE)", foreground=self.C_ACCENT,
-                  font=("Segoe UI", 8, "bold")).pack(side="left", fill="x", expand=True, padx=(1, 3))
-        ttk.Label(kw_cols, text="TỪ KHÓA (YOUTUBE)", foreground=self.C_ACCENT_2,
-                  font=("Segoe UI", 8, "bold")).pack(side="left", fill="x", expand=True, padx=(3, 30))
+        # v1.6.6: ô nhập chủ đề là 1 Text NHIỀU DÒNG (mỗi dòng 1 chủ đề) thay cho danh sách
+        # Entry-pair trong canvas 84px (bị kẹt cuộn + không xuống dòng được). Cuộn NATIVE của
+        # Text — không canvas, không bind_all. Tùy chọn tách YouTube: "chủ đề google | từ khóa youtube".
+        _wrap_label(ttk.Label(
+            card_kw,
+            text="DANH SÁCH CHỦ ĐỀ — mỗi dòng 1 chủ đề (Enter xuống dòng) · "
+                 "tách từ khóa YouTube (tùy chọn): chủ đề google | từ khóa youtube",
+            style="Accent.TLabel", justify="left",
+        )).pack(fill="x", pady=(6, 1))
         kw_box = ttk.Frame(card_kw)
         kw_box.pack(fill="both", expand=True, pady=(2, 2))
-        self.kw_canvas, self.kw_inner = self._make_scrollable(kw_box, 84)
-        self.kw_rows = []  # [{"g": Entry, "y": Entry, "frame": Frame}]
+        self.kw_text = tk.Text(kw_box, height=4, wrap="word", relief="flat",
+                               bg=self.C_FIELD, fg=self.C_FG, insertbackground=self.C_FG,
+                               highlightthickness=1, highlightbackground=self.C_BORDER,
+                               font=("Segoe UI", 10), padx=6, pady=4, undo=True)
+        _kw_sb = ttk.Scrollbar(kw_box, orient="vertical", command=self.kw_text.yview)
+        self.kw_text.configure(yscrollcommand=_kw_sb.set)
+        self.kw_text.pack(side="left", fill="both", expand=True)
+        _kw_sb.pack(side="right", fill="y")
+
+        # Cuộn chuột trực tiếp trên Text (return "break" để canvas cấu hình ngoài không cướp)
+        def _kw_wheel(event):
+            self.kw_text.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            return "break"
+        self.kw_text.bind("<MouseWheel>", _kw_wheel)
+
         _g_saved = self.cfg.get("kw_google") or []
         _y_saved = self.cfg.get("kw_youtube") or []
         if _g_saved or _y_saved:
             self._rebuild_kw_rows(_g_saved, _y_saved)
         else:
-            self._add_kw_row("walking for beginners", "how to start walking daily")
-            self._add_kw_row("us stock market today", "us stock market analysis")
+            self._rebuild_kw_rows(["walking for beginners", "us stock market today"],
+                                  ["how to start walking daily", "us stock market analysis"])
 
         # ============ LOG + STATUS ============
         # --- STATUS BAR (Sprint 0.2): heartbeat các slot, màu theo trạng thái ---
@@ -1360,13 +1396,13 @@ class AutomationApp:
                                    bg=self.C_STATUS_BG, fg=self.C_STATUS_FG,
                                    font=("Segoe UI", 9),
                                    padx=10, pady=4)
-        self.lbl_status.grid(row=6, column=0, sticky="ew")
+        self.lbl_status.grid(row=4, column=0, sticky="ew")
 
         # v1.6.3: khung log bọc frame cao cố định (grid_propagate False) để chiều cao "natural"
-        # lớn của Text/Treeview trong các tab KHÔNG nuốt chỗ vùng cấu hình; weight row 5 vẫn cho
-        # nó co giãn khi cửa sổ cao.
-        nb_wrap = ttk.Frame(root, height=230)
-        nb_wrap.grid(row=5, column=0, sticky="nsew", padx=10, pady=(4, 10))
+        # lớn của Text/Treeview trong các tab KHÔNG nuốt chỗ vùng cấu hình.
+        # v1.6.7: là NGĂN DƯỚI của khung chia kéo được.
+        nb_wrap = ttk.Frame(self.main_pane, height=230, padding=(10, 4, 10, 8))
+        self.main_pane.add(nb_wrap, weight=2)
         nb_wrap.grid_propagate(False)
         nb_wrap.rowconfigure(0, weight=1)
         nb_wrap.columnconfigure(0, weight=1)
@@ -1416,6 +1452,40 @@ class AutomationApp:
         # v1.3.5: mở app xong ~2s thì kiểm tra mốc nuôi acc — profile quá Ngày 4 mà chưa từng
         # nhắc -> popup 1 lần + ghi milestone_history (dedup, không spam mỗi phiên)
         self.root.after(2000, self.check_stage1_milestones)
+        # v1.6.7: đặt vị trí 2 thanh chia sau khi cửa sổ có kích thước thật
+        self.root.after(80, self._init_pane_layout)
+
+    def _init_pane_layout(self, _tries=0):
+        """v1.6.7: đo phần đầu thẻ profile (để danh sách giãn theo ngăn) rồi đặt 2 thanh chia:
+        vị trí đã lưu (pane_sash) nếu còn hợp lệ, không thì mặc định — ngăn chủ đề vừa đủ nội
+        dung, phần còn lại chia ~68% cấu hình / 32% log."""
+        try:
+            self.root.update_idletasks()
+            total = self.main_pane.winfo_height()
+            if total < 200 and _tries < 20:  # cửa sổ chưa map xong -> thử lại
+                self.root.after(100, lambda: self._init_pane_layout(_tries + 1))
+                return
+            self._prof_overhead = max(
+                60, self._card_prof.winfo_reqheight() - self.prof_canvas.winfo_reqheight() + 34)
+            saved = self.cfg.get("pane_sash") or []
+            s0 = s1 = None
+            if (isinstance(saved, list) and len(saved) == 2
+                    and all(isinstance(v, int) for v in saved)
+                    and 150 <= saved[0] < saved[1] - 120 and saved[1] <= total - 80):
+                s0, s1 = saved
+            if s0 is None:
+                panes = self.main_pane.panes()
+                kw_req = (self.root.nametowidget(str(panes[1])).winfo_reqheight()
+                          if len(panes) > 1 else 200)
+                kw_h = min(260, max(170, kw_req))
+                rest = max(300, total - kw_h)
+                s0 = int(rest * 0.68)
+                s1 = s0 + kw_h
+            self.main_pane.sashpos(0, s0)
+            self.main_pane.sashpos(1, s1)
+            self._fit_profile_list()
+        except Exception as e:
+            print(f"[!] Đặt bố cục khung chia lỗi (bỏ qua): {e}")
 
     def _tick_status(self):
         """Sprint 0.2: 5s/lần dựng dòng heartbeat slot. 🟢<3 phút, 🟡 3-10 phút, 🔴 >10 phút im lặng, ⚪ xong.
@@ -2326,12 +2396,6 @@ class AutomationApp:
         tự dùng mẫu offline (generate_topics_from_seed với brain=None vẫn ra đủ N).
         """
         seed = self._pinned_theme_text()
-        if not seed:
-            messagebox.showinfo(
-                "Chủ đề gốc",
-                "Hãy gõ 1 chủ đề gốc vào ô 'Chủ đề gốc' trước khi bấm Sinh chủ đề.",
-            )
-            return
         profiles = [r["id"] for r in self.profile_rows
                     if r["var"].get() and not r["firefox"] and not r.get("hidden", False)]
         n = len(profiles)
@@ -2341,6 +2405,13 @@ class AutomationApp:
                 "Hãy tick chọn ít nhất 1 tài khoản (đang hiện) để biết cần sinh bao nhiêu chủ đề.",
             )
             return
+        kw_lang = lang_profiles.norm(self.var_kw_lang.get())
+        # v1.6.6: để TRỐNG ô gốc + bấm Sinh = bot TỰ CHỌN 1 chủ đề nền rồi sinh (đúng lời hứa
+        # "để trống = bot tự chọn"). Không còn popup bắt điền.
+        auto_seed = False
+        if not seed:
+            seed = lang_profiles.random_seed(kw_lang)
+            auto_seed = True
         brain_type = (self.var_brain_type.get() or "none").strip()
         # v1.5.9: ô 'AI Brain' đang để 'none' nhưng .env có key -> TỰ chọn 1 brain để sinh
         # (chỉ cho tính năng này). Nhờ vậy user không phải nhớ đổi combobox mới xài được AI.
@@ -2350,6 +2421,8 @@ class AutomationApp:
         self.btn_gen_topics.config(state="disabled", text="Đang sinh...")
 
         print(f"\n[+] ===== SINH CHỦ ĐỀ: gốc '{seed}' cho {n} profile đang chọn =====")
+        if auto_seed:
+            print(f"[*] Ô gốc để trống -> bot tự chọn chủ đề nền '{seed}' để sinh.")
         if brain_type != "none":
             print(f"[*] AI Brain đang chọn ở ô cấu hình: '{brain_type}'.")
         elif auto_pick:
@@ -2359,13 +2432,20 @@ class AutomationApp:
             print("    Muốn chủ đề THỰC SỰ khác nhau: chọn Gemini/OpenAI/Qwen ở ô 'AI Brain' hoặc nạp key qua 'QUẢN LÝ API KEY'.")
 
         use_brain_type = brain_type if brain_type != "none" else auto_pick
-        kw_lang = lang_profiles.norm(self.var_kw_lang.get())
         print(f"[*] Ngôn ngữ từ khóa: {lang_profiles.LANG_LABELS[kw_lang]}.")
 
         # Worker CHỈ tính toán (AI/offline) rồi đặt kết quả vào holder. MỌI thao tác Tk
         # (mở dialog, bật lại nút) do MAIN thread làm qua _poll_generated — vì gọi root.after
         # từ thread nền sẽ TREO (Tk không thread-safe). Poller được lên lịch từ main thread.
+        # v1.6.8: HÀNG RÀO DEADLINE — AI (Gemini end-of-life) có thể treo 80s+ -> trước đây
+        # _poll_generated chờ vô hạn nên nút kẹt "Đang sinh...". Giờ lưu ngữ cảnh để nhánh
+        # deadline tự dựng kết quả offline, + token loại kết quả worker về trễ, + cờ one-shot.
+        self._gen_seed, self._gen_n, self._gen_lang = seed, n, kw_lang
+        self._gen_token = object()
+        self._gen_finished = False
+        self._gen_deadline = time.time() + 22  # Gemini timeout 15s < 22s hàng rào an toàn
         self._gen_result = {"done": False}
+        _tok = self._gen_token
 
         # Worker KHÔNG in trực tiếp (print từ thread nền -> ThreadSafeStdout -> root.after
         # = thao tác Tk chéo luồng, có thể treo). Thay vào đó gom log vào list, MAIN thread
@@ -2385,21 +2465,38 @@ class AutomationApp:
             except Exception as e:
                 logs.append(f"[!] Lỗi sinh chủ đề ({e}) - dùng mẫu offline.")
                 topics = generate_topics_from_seed(seed, n, brain=None, log=logs.append, lang=kw_lang)
-            self._gen_result["logs"] = logs
-            self._gen_result["topics"] = topics
-            self._gen_result["seed"] = seed
-            self._gen_result["done"] = True
+            # Chỉ commit nếu đây vẫn là run hiện tại (deadline chưa cắt sang offline).
+            if getattr(self, "_gen_token", None) is _tok:
+                self._gen_result = {"done": True, "logs": logs, "topics": topics, "seed": seed}
 
         threading.Thread(target=_work, daemon=True).start()
         self.root.after(120, self._poll_generated)
 
     def _poll_generated(self):
-        """Chạy trên MAIN thread: chờ worker sinh xong rồi mở bảng xem trước."""
-        res = getattr(self, "_gen_result", None) or {}
-        if not res.get("done"):
-            self.root.after(120, self._poll_generated)
+        """Chạy trên MAIN thread: chờ worker sinh xong rồi mở bảng xem trước.
+
+        v1.6.8: có HÀNG RÀO DEADLINE — nếu worker (AI) quá chậm thì bỏ chờ, dựng offline
+        ngay trên main thread để UI không bao giờ đứng hình. Chạy _after_generate_topics
+        đúng 1 lần nhờ cờ one-shot _gen_finished + token loại kết quả worker về trễ.
+        """
+        if getattr(self, "_gen_finished", False):
             return
-        self._after_generate_topics(res.get("seed", ""), res.get("topics", []), res.get("logs", []))
+        res = getattr(self, "_gen_result", None) or {}
+        if res.get("done"):
+            self._gen_finished = True
+            self._after_generate_topics(res.get("seed", ""), res.get("topics", []), res.get("logs", []))
+            return
+        if time.time() >= getattr(self, "_gen_deadline", 0):
+            # AI quá chậm/treo -> bỏ chờ, tính offline NGAY (nhanh), không đứng hình.
+            self._gen_finished = True
+            self._gen_token = object()  # vô hiệu hóa kết quả worker về trễ
+            logs = ["[!] AI quá chậm/không phản hồi — đã bỏ chờ và dùng mẫu offline để không đứng hình.",
+                    "    (Thêm credit OpenAI, nạp key Qwen, hoặc chọn brain khác để có chủ đề đa dạng hơn.)"]
+            topics = generate_topics_from_seed(self._gen_seed, self._gen_n, brain=None,
+                                               log=logs.append, lang=self._gen_lang)
+            self._after_generate_topics(self._gen_seed, topics, logs)
+            return
+        self.root.after(120, self._poll_generated)
 
     def _after_generate_topics(self, seed, topics, logs=None):
         """Chạy trên main thread: xả log worker + bật lại nút + mở bảng xem trước."""
@@ -2864,11 +2961,57 @@ class AutomationApp:
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
 
-        def _wheel(event):
-            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-        canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", _wheel))
-        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+        # v1.6.7: đăng ký cho bộ cuộn toàn cục (_on_global_wheel) thay vì bind_all theo hover.
+        try:
+            self._wheel_targets.add(canvas)
+        except AttributeError:
+            self._wheel_targets = {canvas}
         return canvas, inner
+
+    def _on_global_wheel(self, event):
+        """v1.6.7: cuộn vùng cuộn GẦN NHẤT dưới con trỏ; vùng đó đã chạm đầu/cuối thì
+        chuyển lên vùng cha (vd hết danh sách profile -> cuộn cả khu cấu hình).
+        Text/Treeview/Listbox tự cuộn bằng binding lớp của Tk -> không đụng (tránh cuộn 2 lần)."""
+        try:
+            w = self.root.winfo_containing(event.x_root, event.y_root)
+        except Exception:
+            return
+        delta = event.delta
+        if not delta:
+            return
+        step = -1 if delta > 0 else 1
+        targets = getattr(self, "_wheel_targets", set())
+        while w is not None:
+            if w in targets:
+                try:
+                    top, bottom = w.yview()
+                except Exception:
+                    top, bottom = 0.0, 1.0
+                can = (step < 0 and top > 0.0) or (step > 0 and bottom < 1.0)
+                if can:
+                    w.yview_scroll(step * max(1, abs(int(delta / 120))), "units")
+                    return
+            elif isinstance(w, (tk.Text, tk.Listbox, ttk.Treeview)):
+                return  # widget tự cuộn
+            try:
+                parent_name = w.winfo_parent()
+                w = w.nametowidget(parent_name) if parent_name else None
+            except Exception:
+                return
+
+    def _fit_profile_list(self, event=None):
+        """v1.6.7: chiều cao danh sách profile = chiều cao ngăn trên trừ phần đầu thẻ
+        (nút + ô lọc) — ngăn càng cao càng thấy nhiều acc, tối thiểu 160px."""
+        try:
+            body_h = event.height if event is not None else self.body_canvas.winfo_height()
+            overhead = getattr(self, "_prof_overhead", None)
+            if overhead is None:
+                return
+            new_h = max(160, int(body_h - overhead))
+            if abs(int(float(self.prof_canvas.cget("height"))) - new_h) > 2:
+                self.prof_canvas.configure(height=new_h)
+        except Exception:
+            pass
 
     # ---------------- Checklist tài khoản (1.3) + nhóm kiểu GPM (v1.3.6) ----------------
     def _rebuild_profile_rows(self, entries):
@@ -3147,46 +3290,46 @@ clearly tách nhóm hơn kiểu label trần + separator."""
 
         ttk.Button(win, text="Thêm vào danh sách", command=ok).pack(pady=8)
 
-    # ---------------- Cặp từ khóa (1.4) ----------------
-    def _add_kw_row(self, g="", y="", focus=False):
-        row = ttk.Frame(self.kw_inner)
-        row.pack(fill="x", pady=1)
-        ent_g = ttk.Entry(row)
-        ent_g.insert(0, g)
-        ent_y = ttk.Entry(row)
-        ent_y.insert(0, y)
-        ent_g.pack(side="left", fill="x", expand=True, padx=(0, 3))
-        ent_y.pack(side="left", fill="x", expand=True, padx=(3, 3))
-        data = {"g": ent_g, "y": ent_y, "frame": row}
-        ttk.Button(row, text="X", width=3, style="Tool.TButton",
-                   command=lambda d=data: self._remove_kw_row(d)).pack(side="left", padx=(2, 0))
-        self.kw_rows.append(data)
-        if focus:
-            ent_g.focus_set()
-        return data
-
-    def _remove_kw_row(self, data):
-        if data in self.kw_rows:
-            self.kw_rows.remove(data)
-        data["frame"].destroy()
-        if not self.kw_rows:
-            self._add_kw_row("", "")
-
+    # ---------------- Chủ đề xuyên suốt (v1.6.6: ô Text nhiều dòng, mỗi dòng 1 chủ đề) ----------------
     def _rebuild_kw_rows(self, g_list, y_list):
-        for r in self.kw_rows:
-            r["frame"].destroy()
-        self.kw_rows = []
+        """Đổ danh sách cặp (google, youtube) vào ô Text — mỗi cặp 1 dòng.
+        youtube trống hoặc trùng google -> chỉ ghi google; khác -> 'google | youtube'.
+        Giữ tên hàm để đường 'Áp dụng' (dialog xem trước) + test_v150 không đổi."""
+        g_list = g_list or []
+        y_list = y_list or []
+        lines = []
         n = max(len(g_list), len(y_list))
         for i in range(n):
-            self._add_kw_row(g_list[i] if i < len(g_list) else "",
-                             y_list[i] if i < len(y_list) else "")
+            g = (g_list[i] if i < len(g_list) else "").strip()
+            y = (y_list[i] if i < len(y_list) else "").strip()
+            if not g and not y:
+                continue
+            g = g or y
+            lines.append(f"{g} | {y}" if (y and y != g) else g)
+        try:
+            self.kw_text.delete("1.0", "end")
+            if lines:
+                self.kw_text.insert("1.0", "\n".join(lines))
+        except Exception:
+            pass
 
     def _collect_kw_pairs(self):
-        """Danh sách chủ đề từ các cặp; YouTube trống -> dùng lại Google (như quy tắc cũ)."""
+        """Danh sách chủ đề đọc từ ô Text — mỗi dòng 1 chủ đề (bỏ dòng trống).
+        Tách theo '|' đầu tiên: trái = Google, phải = YouTube; YouTube trống -> dùng lại Google."""
         pairs = []
-        for r in self.kw_rows:
-            g = r["g"].get().strip()
-            y = r["y"].get().strip()
+        try:
+            raw = self.kw_text.get("1.0", "end")
+        except Exception:
+            raw = ""
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if "|" in line:
+                left, _, right = line.partition("|")
+                g, y = left.strip(), right.strip()
+            else:
+                g, y = line, ""
             if not g and not y:
                 continue
             pairs.append({"google_query": g or y, "youtube_query": y or g})
@@ -3271,13 +3414,14 @@ clearly tách nhóm hơn kiểu label trần + separator."""
             for r in self.profile_rows
         ]
         g_list, y_list = [], []
-        for r in self.kw_rows:
-            g = r["g"].get().strip()
-            y = r["y"].get().strip()
+        for p in self._collect_kw_pairs():
+            g = (p.get("google_query") or "").strip()
+            y = (p.get("youtube_query") or "").strip()
             if not g and not y:
                 continue
             g_list.append(g)
-            y_list.append(y)
+            # YouTube trùng Google (dòng không có '|') -> lưu rỗng để giữ schema gọn như cũ
+            y_list.append("" if y == g else y)
         cfg["kw_google"] = g_list
         cfg["kw_youtube"] = y_list
         cfg["browser_type"] = self.var_browser_type.get()
@@ -3301,6 +3445,11 @@ clearly tách nhóm hơn kiểu label trần + separator."""
             cfg["daily_minutes"] = 30
         cfg["pinned_theme"] = self._pinned_theme_text()  # v1.5.3: nhớ chủ đề ghim
         cfg["keyword_lang"] = self._keyword_lang()  # v1.6.1: nhớ ngôn ngữ từ khóa
+        try:  # v1.6.7: nhớ vị trí 2 thanh chia (cấu hình | chủ đề | log)
+            if self.main_pane.winfo_height() > 200:
+                cfg["pane_sash"] = [int(self.main_pane.sashpos(0)), int(self.main_pane.sashpos(1))]
+        except Exception:
+            pass
         # v1.5.4: nhớ trạng thái bot Telegram (token nằm trong .env, KHÔNG lưu ở đây)
         cfg["telegram_enabled"] = bool(self.cfg.get("telegram_enabled", False))
         cfg["telegram_chat_id"] = str(self.cfg.get("telegram_chat_id", "") or "")

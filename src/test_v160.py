@@ -9,6 +9,7 @@ OFFLINE (không cần browser). Chạy:  python src\\test_v160.py
 DB/config test nằm ở thư mục tạm (GPM_BOT_DATA_DIR) — KHÔNG đụng data\\ thật.
 """
 import os
+import random
 import sys
 import tempfile
 
@@ -102,7 +103,8 @@ class FakeBrain:
 
 
 # offline: template đúng ngôn ngữ (seed English để thấy rõ phần template)
-tv = gen("walking", 4, brain=None, lang="vi")
+# rng cố định -> không còn flaky (trước đây shuffle 16 mẫu lấy 4 đầu, đôi khi hụt marker)
+tv = gen("walking", 4, brain=None, rng=random.Random(0), lang="vi")
 check("offline vi dùng mẫu tiếng Việt", any("cửa hàng" in t["google_query"] or "mua" in t["google_query"] or "cách" in t["google_query"] for t in tv), str([t["google_query"] for t in tv]))
 tj = gen("walking", 4, brain=None, lang="ja")
 check("offline ja dùng ký tự tiếng Nhật", any(any(ord(ch) > 0x3000 for ch in t["google_query"]) for t in tj), str([t["google_query"] for t in tj]))
