@@ -264,6 +264,20 @@ class DatabaseHandler:
             CREATE INDEX IF NOT EXISTS idx_stage_history_profile
             ON stage_history (profile_id, entered_at)
         ''')
+        # v1.7.7: CỤM TỪ KHÓA — mỗi lần 1 profile dùng 1 từ khóa của cụm ghi 1 dòng, để phiên sau
+        # ƯU TIÊN từ khóa chưa dùng (xoay vòng nối tiếp). Bảng mới: CREATE IF NOT EXISTS, không ALTER.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS keyword_usage (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                profile_id TEXT NOT NULL,
+                keyword TEXT NOT NULL,
+                used_at TEXT NOT NULL
+            )
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_keyword_usage_profile
+            ON keyword_usage (profile_id, keyword)
+        ''')
         conn.commit()
         conn.close()
         # Sprint 2: bảo đảm schema mới (status/duration_s/error) — idempotent, tự backup trước khi đổi
@@ -473,6 +487,45 @@ class DatabaseHandler:
         conn.commit()
         conn.close()
         _say(f"[+] Đã ghi log Database: Profile {profile_id} vừa tạo alert '{query.strip()}' lúc {now_str}.")
+
+    # ================= CỤM TỪ KHÓA (v1.7.7) =================
+    def log_keyword_used(self, profile_id, keyword):
+        """Ghi 1 lần profile dùng 1 từ khóa của cụm. Best-effort, trả True/False."""
+        kw = (keyword or "").strip()
+        if not profile_id or not kw:
+            return False
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.execute(
+                "INSERT INTO keyword_usage (profile_id, keyword, used_at) VALUES (?, ?, ?)",
+                (profile_id, kw.lower(), datetime.datetime.now().isoformat(timespec="seconds")),
+            )
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            _say(f"[!] log_keyword_used lỗi (bỏ qua): {e}")
+            return False
+
+    def get_keyword_last_used(self, profile_id, keywords=None):
+        """-> {keyword_lower: lần dùng gần nhất (ISO)} của 1 profile. Best-effort -> {}."""
+        if not profile_id:
+            return {}
+        try:
+            conn = sqlite3.connect(self.db_path)
+            sql = "SELECT keyword, MAX(used_at) FROM keyword_usage WHERE profile_id = ?"
+            params = [profile_id]
+            kws = [(k or "").strip().lower() for k in (keywords or []) if (k or "").strip()]
+            if kws:
+                sql += f" AND keyword IN ({','.join('?' * len(kws))})"
+                params += kws
+            sql += " GROUP BY keyword"
+            rows = conn.execute(sql, params).fetchall()
+            conn.close()
+            return {k: t for k, t in rows}
+        except Exception as e:
+            _say(f"[!] get_keyword_last_used lỗi (bỏ qua): {e}")
+            return {}
 
     # ================= ACTIVITY / REPORTING (Task 5) =================
     def log_activity(self, profile_id, action, platform="", url="", title="",

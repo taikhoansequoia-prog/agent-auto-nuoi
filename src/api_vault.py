@@ -138,6 +138,56 @@ def get_endpoint(name, path=None):
     return (get_key(endpoint_name(name), path) or "").strip()
 
 
+# Biến "đánh số" đi kèm một key: GEMINI_API_KEY_2, GEMINI_API_KEY_3...
+# Chỉ nhận HẬU TỐ SỐ -> không bao giờ nuốt nhầm GEMINI_API_KEY_ENDPOINT.
+_NUMBERED_SUFFIX_RE = re.compile(r"^_(\d+)$")
+
+
+def get_keys(name, path=None):
+    """v1.7.1 -> DANH SÁCH key của một dịch vụ (để xoay vòng khi hết quota).
+
+    Gom từ 2 cách khai báo, cách nào cũng được, trộn cả hai cũng được:
+      1) Nhiều key trong 1 biến:  GEMINI_API_KEY=key1,key2,key3   (ngăn bằng , ; hoặc xuống dòng)
+      2) Biến đánh số:            GEMINI_API_KEY_2=...  GEMINI_API_KEY_3=...  (sắp theo số)
+
+    Ưu tiên file .env rồi tới os.environ (giống get_key). Dedupe giữ thứ tự.
+    Không có key nào -> []. Best-effort: lỗi I/O -> [].
+    """
+    name = (name or "").strip()
+    if not name:
+        return []
+    out, seen = [], set()
+
+    def _push(raw):
+        for part in re.split(r"[,;\r\n]+", str(raw or "")):
+            part = part.strip().strip("\"'")
+            if part and part not in seen:
+                seen.add(part)
+                out.append(part)
+
+    try:
+        _push(get_key(name, path))
+        # Thu tên các biến đánh số từ CẢ .env lẫn os.environ rồi sắp theo số thứ tự.
+        numbered = {}
+        try:
+            names = [k for k, _ in list_keys(path)]
+        except Exception:
+            names = []
+        names += list(os.environ.keys())
+        prefix = name + "_"
+        for k in names:
+            if not k.startswith(prefix):
+                continue
+            m = _NUMBERED_SUFFIX_RE.match(k[len(name):])
+            if m:
+                numbered[int(m.group(1))] = k
+        for idx in sorted(numbered):
+            _push(get_key(numbered[idx], path))
+    except Exception as e:
+        print(f"[!] api_vault: không đọc được danh sách key '{name}' ({e}).")
+    return out
+
+
 def set_key(name, value, path=None):
     """Cập nhật (hoặc thêm mới) KEY=value vào .env, đồng bộ os.environ. -> True/False."""
     name = (name or "").strip()
@@ -193,6 +243,66 @@ def delete_key(name, path=None):
 def delete_endpoint(name, path=None):
     """Gỡ endpoint tự đặt của một key -> acc/brain quay về cổng chính. v1.5.6."""
     return delete_key(endpoint_name(name), path)
+
+
+# ---------------------------------------------------------------- v1.7.6: model + cổng tự đặt
+def model_name(name):
+    """Biến đi kèm chứa TÊN MODEL của một key: DEEPSEEK -> DEEPSEEK_MODEL."""
+    return f"{(name or '').strip().upper()}_MODEL"
+
+
+def get_model(name, path=None):
+    return (get_key(model_name(name), path) or "").strip()
+
+
+def delete_model(name, path=None):
+    return delete_key(model_name(name), path)
+
+
+def is_companion_key(name, existing=None):
+    """True nếu là biến đi kèm (_ENDPOINT, hoặc _MODEL khi key cha có trong `existing`)."""
+    n = (name or "").strip().upper()
+    if n.endswith("_ENDPOINT"):
+        return True
+    if n.endswith("_MODEL") and existing is not None:
+        return n[: -len("_MODEL")] in existing
+    return False
+
+
+_INVALID_NAME_CHARS = re.compile(r"[^A-Z0-9_]")
+
+
+def sanitize_key_name(raw):
+    """Chuẩn hoá tên key: mọi ký tự lạ ('.', '-', ' ', ...) -> '_', bắt đầu bằng số -> 'KEY_'.
+    'deepseek-v4.1-flash' -> 'DEEPSEEK_V4_1_FLASH'."""
+    n = _INVALID_NAME_CHARS.sub("_", (raw or "").strip().upper())
+    n = re.sub(r"_+", "_", n).strip("_")
+    if n and n[0].isdigit():
+        n = "KEY_" + n
+    return n
+
+
+# Tên key đã có brain riêng trong app -> không coi là "cổng tự đặt".
+_BUILTIN_BRAIN_KEYS = {"GEMINI_API_KEY", "OPENAI_API_KEY", "QWEN_API_KEY", "DASHSCOPE_API_KEY",
+                       "CLAUDE_API_KEY", "CLAUDE_LAU", "TELEGRAM_BOT_TOKEN"}
+
+
+def custom_providers(path=None):
+    """[(tên key, endpoint, model)] của mọi key CÓ endpoint mà app chưa có brain riêng.
+    Mỗi cái thành một brain 'custom:<TEN>' (cổng tương thích OpenAI)."""
+    try:
+        pairs = list_keys(path)
+    except Exception:
+        return []
+    env = dict(pairs)
+    out = []
+    for k, v in pairs:
+        if not v or k in _BUILTIN_BRAIN_KEYS or is_companion_key(k, env):
+            continue
+        ep = (env.get(endpoint_name(k)) or "").strip()
+        if ep:
+            out.append((k, ep, (env.get(model_name(k)) or "").strip()))
+    return out
 
 
 def sync_env_into_process(path=None):

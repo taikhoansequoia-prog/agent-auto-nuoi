@@ -35,11 +35,16 @@ TOPIC_TEMPLATES = {
            "cửa hàng {s} gần đây", "{s} giá bao nhiêu", "{s} giảm cân", "lợi ích của {s}",
            "kinh nghiệm {s}", "so sánh {s}", "review {s} 2026", "{s} thời tiết hôm nay",
            "dụng cụ {s}", "sai lầm thường gặp khi {s}", "hướng dẫn {s}"),
-    "en": ("{s}", "how to {s}", "best {s} for beginners", "where to buy {s} gear",
-           "{s} shoes shopping", "{s} clothes shopping", "{s} shop near me",
-           "{s} weather today", "{s} to lose weight", "{s} benefits for health",
-           "{s} tips and tricks", "{s} mistakes to avoid", "best {s} equipment",
-           "{s} vs alternatives", "{s} review 2026", "{s} for beginners guide"),
+    # v1.7.3: mẫu cũ ghép máy móc nên ra câu vô nghĩa với chủ đề không phải môn thể thao
+    # ("autumn fashion to lose weight", "christmast shoes shopping"). Bộ mới trung tính hơn:
+    # hợp cho hoạt động, sự kiện, thời trang lẫn địa điểm. MỌI mẫu phải có "{s}" (test_v160:72).
+    "en": ("{s}", "how to get started with {s}", "{s} ideas for beginners",
+           "best {s} gear to buy", "where to buy {s} stuff online", "{s} shop near me",
+           "{s} checklist", "{s} on a budget", "{s} tips and tricks",
+           "common {s} mistakes", "best {s} products 2026", "{s} review 2026",
+           "{s} guide for beginners", "what to wear for {s}", "{s} planning ideas",
+           "{s} weather forecast", "{s} near me this weekend", "{s} inspiration photos",
+           "is {s} worth it", "{s} vs other options"),
     "ja": ("{s}", "{s} とは", "{s} 初心者", "{s} おすすめ", "{s} 買うなら",
            "{s} 近くの店", "{s} 値段", "{s} ダイエット", "{s} 効果",
            "{s} やり方", "{s} 比較", "{s} レビュー 2026", "{s} 今日の天気",
@@ -100,7 +105,7 @@ NEWS_SITES = {
     "en": [("https://edition.cnn.com/", "cnn.com"), ("https://www.bbc.com/news", "bbc.com"),
            ("https://www.nytimes.com/", "nytimes.com"), ("https://www.theguardian.com/international", "theguardian.com"),
            ("https://www.reuters.com/", "reuters.com"), ("https://apnews.com/", "apnews.com"),
-           ("https://www.cnbc.com/", "cnbc.com")],
+           ("https://www.cnbc.com/", "cnbc.com"), ("https://www.foxnews.com/", "foxnews.com")],
     "ja": [("https://www3.nhk.or.jp/news/", "nhk.or.jp"), ("https://news.yahoo.co.jp/", "yahoo.co.jp"),
            ("https://www.asahi.com/", "asahi.com"), ("https://mainichi.jp/", "mainichi.jp"),
            ("https://www.nikkei.com/", "nikkei.com"), ("https://www.yomiuri.co.jp/", "yomiuri.co.jp")],
@@ -157,6 +162,16 @@ def random_seed(lang, rng=None):
 
 def plan_pool(lang):
     return list(PLAN_POOL[norm(lang)])
+
+
+# v1.8.9: chủ đề đã là CẢ CÂU tìm kiếm (>=4 từ) thì KHÔNG nhét vào mẫu kiểu "best {s} gear to buy"
+# (ra câu vô nghĩa như "best how to build an emergency fund gear to buy"). Chỉ nối 1 hậu tố tự nhiên.
+PLAN_SAFE_SUFFIX = {"vi": ("kinh nghiệm", "review"), "en": ("tips", "reddit"),
+                    "ja": ("コツ", "口コミ"), "ko": ("꿀팁", "후기")}
+
+
+def plan_safe_suffix(lang):
+    return PLAN_SAFE_SUFFIX[norm(lang)]
 
 
 def plan_default_base(lang):

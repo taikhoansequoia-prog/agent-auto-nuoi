@@ -80,6 +80,7 @@ PHASE_DETAILS = {
             ("Xem TikTok", 0.15, "Vào TikTok QUA CỔNG GOOGLE, xem thuần 3-7 video, không like/comment. v1.5.2: trọng số giảm mạnh + CAP số lượt trong phiên (không còn vào liên tục).", None),
             ("Đọc Wikipedia", 0.35, "Vào Wikipedia qua Google theo ngôn ngữ máy (vi/en...), cuộn đọc 60-120s, 40% bấm thêm 1 link nội bộ rồi đọc tiếp.", None),
             ("Đọc báo", 0.35, "Lên Google gõ 'chủ đề + tên báo' rồi bấm kết quả (1 trong 13 trang báo VN + quốc tế), lướt trang chủ 30-60s rồi bấm 1-2 bài đọc 60-180s.", None),
+            ("Báo quốc tế CNN/BBC/Fox", 0.25, "Lên Google gõ tên báo rồi bấm kết quả: CNN / BBC / Fox News (ngẫu nhiên 1 trang), lướt trang chủ 40-90s rồi bấm ĐÚNG 1 bài đọc 2.5-5.5 phút.", None),
             ("Google: tìm + đọc tin", 0.25, "Tìm chủ đề tin tức trên Google, bấm tab 'Tin tức', đọc 1-3 bài (cuộn nghỉ 8-16s mỗi nhịp).", None),
             ("Thời tiết ngẫu nhiên", 0.10, "Hỏi Google thời tiết bằng từ khóa cố định ngoài chủ đề phiên, xem thẻ dự báo chi tiết.", "rand"),
             ("Google Finance", 0.10, "Xem google.com/finance, tra 1 mã ngẫu nhiên (BTC-USD, AAPL, TSLA...), ngắm biểu đồ + đọc 1 bài tài chính.", "rand"),
@@ -100,6 +101,7 @@ PHASE_DETAILS = {
                  "KHÔNG có YouTube trong lịch trình pha này."),
         "actions": [
             ("Đọc báo", 0.35, "Lên Google gõ 'chủ đề + tên báo' rồi bấm kết quả (1 trong 13 trang báo), lướt trang chủ rồi bấm 1-2 bài đọc 60-180s.", None),
+            ("Báo quốc tế CNN/BBC/Fox", 0.25, "Lên Google gõ tên báo rồi bấm kết quả: CNN / BBC / Fox News (ngẫu nhiên 1 trang), lướt trang chủ 40-90s rồi bấm ĐÚNG 1 bài đọc 2.5-5.5 phút.", None),
             ("Google Alerts", 0.35, "Vào google.com/alerts: NHÁNH A tạo alert mới cho từ khóa phiên (gate DB: từ khóa chưa trùng + tối đa 1 alert mới/7 ngày/profile) hoặc NHÁNH B chăm alert cũ (hover, xem preview, mở edit rồi đóng — không sửa/xóa).", None),
             ("Google Maps", 0.25, "Vào Maps qua cổng Google, tìm 1 địa điểm theo chủ đề, bấm đọc thông tin nơi đó, xem tab đánh giá.", None),
             ("Đọc Wikipedia", 0.30, "Vào Wikipedia qua Google theo ngôn ngữ máy, cuộn đọc 60-120s.", None),
@@ -123,6 +125,7 @@ PHASE_DETAILS = {
             ("Tìm kiếm YouTube", 0.60, "Gõ từ khóa YouTube (gõ như người thật), lướt kết quả, bấm 1 trong 4 video đầu, xem chuỗi 2-3 video.", "yt"),
             ("Xem trang chủ YouTube", 0.40, "Lướt feed trang chủ, hover preview thumbnail, chốt video xem 55-90% thời lượng. Trang chủ trống -> tự chuyển sang tìm kiếm.", "yt"),
             ("Đọc báo", 0.20, "Điểm xuyết: lên Google gõ 'chủ đề + tên báo' rồi bấm kết quả, bấm 1-2 bài.", None),
+            ("Báo quốc tế CNN/BBC/Fox", 0.15, "Lên Google gõ tên báo rồi bấm kết quả: CNN / BBC / Fox News (ngẫu nhiên 1 trang), lướt trang chủ 40-90s rồi bấm ĐÚNG 1 bài đọc 2.5-5.5 phút.", None),
             ("Đọc Wikipedia", 0.20, "Điểm xuyết đọc Wikipedia qua cổng Google.", None),
             ("Google Maps", 0.20, "Tìm địa điểm theo chủ đề trên Google Maps (qua cổng Google), bấm đọc thông tin + xem đánh giá.", None),
             ("Google Alerts (chăm thôi)", 0.15, "Mở google.com/alerts xem/hover/preview alert đã có — code CHẶN tạo mới khi phase = youtube.", None),
@@ -172,6 +175,40 @@ SLOT_PROFILE = {}
 STOP_EVENT = threading.Event()
 # Heartbeat (Sprint 0.2): mỗi slot ghi nhận lần in log cuối + tên + thread còn sống
 SLOT_LAST_LOG = {}      # "Slot N" -> epoch float lần cuối có log
+# v1.8.9: WATCHDOG — slot đang chạy mà im lặng quá lâu = lệnh Playwright treo vĩnh viễn (gặp thật 19/11:
+# MemoryError trong luồng sự kiện làm mất phản hồi -> luồng đứng im, app kẹt "ĐANG CHẠY"). Đóng profile
+# qua API thì lệnh treo ném lỗi "browser has been closed" -> luồng tự thoát, trả slot + proxy.
+# 15 phút: nhịp im lặng HỢP LỆ dài nhất là nghỉ giữa 2 hành động (tối đa 8 phút).
+WATCHDOG_SILENT_S = 900
+SLOT_API = {}           # "Slot N" -> (api, profile_id) của profile đang chạy
+_WATCHDOG_DONE = set()  # (slot_key, profile_id) đã giải cứu — mỗi chu trình 1 lần
+
+
+def watchdog_rescue(now=None, spawn=None):
+    """Đóng profile của mọi slot im lặng > WATCHDOG_SILENT_S. -> [(slot_key, pid, tuổi_im_lặng_s)]."""
+    now = now or time.time()
+    hits = []
+    for key, alive in list(SLOT_THREAD_ALIVE.items()):
+        ent = SLOT_API.get(key)
+        if not alive or not ent:
+            continue
+        api, pid = ent
+        age = int(now - SLOT_LAST_LOG.get(key, now))
+        if age < WATCHDOG_SILENT_S or (key, pid) in _WATCHDOG_DONE:
+            continue
+        _WATCHDOG_DONE.add((key, pid))
+        hits.append((key, pid, age))
+
+        def _close(api=api, pid=pid, key=key, age=age):
+            print(f"[!] [Watchdog] {key} ({pid[:8]}) im lặng {age // 60} phút — coi là TREO. "
+                  f"Đóng profile để giải cứu luồng (chu trình sẽ ghi là lỗi).")
+            try:
+                api.close_profile(pid)
+            except Exception as e:
+                print(f"[!] [Watchdog] Không đóng được profile {pid[:8]}: {e}")
+
+        (spawn or (lambda fn: threading.Thread(target=fn, daemon=True).start()))(_close)
+    return hits
 SLOT_LABEL = {}         # "Slot N" -> tên profile đang chạy ở slot
 SLOT_THREAD_ALIVE = {}  # "Slot N" -> bool thread còn đang xử lý
 # v1.4.0: epoch lúc BẮT ĐẦU chu trình ngâm của slot (đếm thời gian thực trên heartbeat/Bảng)
@@ -184,6 +221,152 @@ SLOT_CYCLE_INFO = {}
 # trước xong mới tới lượt). Set này được clear mỗi phiên mới trong start_automation.
 _STAGGER_LOCK = threading.Lock()
 _STAGGERED_SLOTS = set()
+
+# v1.8.1: CHẶN TRÙNG PROXY — 2 profile cùng IP proxy KHÔNG được chạy đồng thời.
+# _PROXY_MAP {profile_id: raw_proxy} nạp ở đầu run_thread_pool; _PROXY_BUSY {ip: profile_id}.
+_PROXY_COND = threading.Condition()
+_PROXY_BUSY = {}
+_PROXY_MAP = {}
+# v1.8.2: hiển thị LUÔN — trạng thái chặn trùng ("BẬT" / "TẮT (lý do)") + ai đang chờ proxy
+_PROXY_STATE = {"on": False, "why": "", "n_proxy": 0}
+_PROXY_WAITING = {}   # {profile_id: ip} đang chờ proxy rảnh
+
+
+def fetch_proxy_map(browser_type, api_port=""):
+    """v1.8.2: -> (map {pid: raw_proxy}, lý do TẮT hoặc ''). GPM đọc qua API; BitBrowser chưa hỗ trợ."""
+    if browser_type != BROWSER_GPM:
+        return {}, "BitBrowser chưa hỗ trợ đọc proxy"
+    try:
+        base = f"http://localhost:{int(api_port)}" if api_port else "http://localhost:9495"
+        pmap = BrowserFactory.get_api(BROWSER_GPM, base_url=base).get_proxy_map()
+    except Exception as e:
+        return {}, f"không đọc được proxy từ GPM ({str(e)[:60]})"
+    if not pmap:
+        return {}, "GPM không trả về proxy nào"
+    return pmap, ""
+
+
+MAX_ACC_PER_PROXY = 5   # v1.8.6: user giảm còn tối đa 5 acc / proxy
+
+
+def proxy_summary_lines(profiles, proxy_map, n_slots, why_off="", name_of=None):
+    """v1.8.2: các dòng mô tả lịch chạy chặn trùng proxy (dùng chung cho log + hộp xác nhận)."""
+    name_of = name_of or (lambda pid: pid[:8])
+    if why_off:
+        return [f"Chặn trùng proxy: TẮT — {why_off}. Các profile chạy theo số luồng như cũ."]
+    groups = {}
+    no_proxy = 0
+    for pid in profiles:
+        ip = proxy_key((proxy_map or {}).get(pid, ""))
+        if ip:
+            groups.setdefault(ip, []).append(pid)
+        else:
+            no_proxy += 1
+    shared = {ip: pids for ip, pids in groups.items() if len(pids) > 1}
+    par = min(n_slots, len(groups) + no_proxy) if (groups or no_proxy) else n_slots
+    lines = [f"Chặn trùng proxy: BẬT — {len(profiles)} profile / {len(groups)} proxy"
+             + (f" ({no_proxy} không proxy)" if no_proxy else "")
+             + f" · thứ tự ngẫu nhiên · tối đa {par} trình duyệt cùng lúc."]
+    # v1.8.6: đếm TỔNG số acc trên mỗi IP trong GPM (không chỉ lô đang chạy) -> nhắc khi > MAX_ACC_PER_PROXY
+    totals = {}
+    for _pid, _raw in (proxy_map or {}).items():
+        _ip = proxy_key(_raw)
+        if _ip:
+            totals[_ip] = totals.get(_ip, 0) + 1
+    heavy = sorted(((ip, totals.get(ip, 0)) for ip in groups if totals.get(ip, 0) > MAX_ACC_PER_PROXY),
+                   key=lambda kv: -kv[1])
+    if heavy:
+        lines.append(f"[!] {len(heavy)} proxy đang gánh quá {MAX_ACC_PER_PROXY} acc (khuyên tối đa "
+                     f"{MAX_ACC_PER_PROXY}): " + ", ".join(f"{ip} = {n} acc" for ip, n in heavy[:5])
+                     + (f" … +{len(heavy) - 5}" if len(heavy) > 5 else ""))
+    if shared:
+        lines.append(f"{len(shared)} proxy dùng chung -> các profile dưới đây chạy LẦN LƯỢT, không bao giờ cùng lúc:")
+        for ip, pids in sorted(shared.items(), key=lambda kv: -len(kv[1])):
+            names = ", ".join(name_of(p) for p in pids[:6]) + (f" … +{len(pids) - 6}" if len(pids) > 6 else "")
+            lines.append(f"  • {ip}: {len(pids)} profile — {names}")
+    else:
+        lines.append("Không proxy nào dùng chung -> không profile nào phải chờ.")
+    if n_slots > par:
+        lines.append(f"Lưu ý: số luồng ({n_slots}) > số proxy khác nhau ({par}) -> dư {n_slots - par} luồng sẽ phải chờ proxy rảnh.")
+    return lines
+
+
+def proxy_key(raw):
+    """IP của proxy (bỏ scheme://, user:pass@; lấy host trước ':'). Rỗng -> '' (không khóa).
+    'ip:port:user:pass' / 'ip:port' / 'socks5://u:p@ip:port' / 'http://ip:port' -> 'ip'."""
+    r = (raw or "").strip()
+    if not r:
+        return ""
+    if "://" in r:
+        r = r.split("://", 1)[1]
+    if "@" in r:
+        r = r.rsplit("@", 1)[1]
+    return r.split(":", 1)[0].strip().lower()
+
+
+def order_profiles_by_proxy(profiles, proxy_map, rng=None):
+    """Xáo ngẫu nhiên rồi XEN KẼ theo IP proxy (vòng tròn giữa các nhóm) -> đợt đầu
+    toàn proxy khác nhau, profile chung proxy dàn ra sau. Giữ đủ mọi phần tử."""
+    rng = rng or random
+    groups = {}
+    for pid in profiles:
+        k = proxy_key((proxy_map or {}).get(pid, "")) or f"__noproxy__{pid}"
+        groups.setdefault(k, []).append(pid)
+    lists = list(groups.values())
+    for lst in lists:
+        rng.shuffle(lst)
+    rng.shuffle(lists)
+    out = []
+    while any(lists):
+        for lst in lists:
+            if lst:
+                out.append(lst.pop())
+    return out
+
+
+def _acquire_proxy(profile_id):
+    """Chờ tới khi IP proxy của profile rảnh rồi giữ nó. False nếu bấm DỪNG khi đang chờ."""
+    ip = proxy_key(_PROXY_MAP.get(profile_id, ""))
+    if not ip:
+        if _PROXY_STATE.get("on"):
+            print(f"[{profile_id[:8]}] Không có proxy — không cần chặn trùng.")
+        return True
+    told = False
+    t_wait = time.time()
+    with _PROXY_COND:
+        while True:
+            holder = _PROXY_BUSY.get(ip)
+            if holder is None or holder == profile_id:
+                _PROXY_BUSY[ip] = profile_id
+                _PROXY_WAITING.pop(profile_id, None)
+                if told:
+                    print(f"[{profile_id[:8]}] ✅ Proxy {ip} đã rảnh — tới lượt chạy "
+                          f"(đã chờ {_fmt_dur(int(time.time() - t_wait))}).")
+                else:
+                    print(f"[{profile_id[:8]}] 🔒 Giữ proxy {ip} — không profile nào khác dùng IP này lúc này.")
+                return True
+            if STOP_EVENT.is_set():
+                _PROXY_WAITING.pop(profile_id, None)
+                return False
+            if not told:
+                print(f"[{profile_id[:8]}] ⏳ Chờ proxy {ip} đang được {holder[:8]} dùng — "
+                      f"chạy sau để không trùng IP.")
+                _PROXY_WAITING[profile_id] = ip
+                told = True
+            _PROXY_COND.wait(timeout=0.5)
+
+
+def _release_proxy(profile_id):
+    ip = proxy_key(_PROXY_MAP.get(profile_id, ""))
+    if not ip:
+        return
+    with _PROXY_COND:
+        if _PROXY_BUSY.get(ip) == profile_id:
+            _PROXY_BUSY.pop(ip, None)
+            n_wait = sum(1 for v in _PROXY_WAITING.values() if v == ip)
+            print(f"[{profile_id[:8]}] 🔓 Nhả proxy {ip}"
+                  + (f" — {n_wait} profile đang chờ IP này." if n_wait else "."))
+        _PROXY_COND.notify_all()
 
 
 def _fmt_dur(v):
@@ -328,13 +511,124 @@ def assign_topics_for_run(profile_ids, themes):
             random.shuffle(shuffled)
         theme = shuffled[i % len(shuffled)]
         assignment_map[pid] = theme
+        # v1.7.7: theme mang CẢ CỤM (khóa "cluster") -> bảng hiện đủ các từ khóa của cụm.
+        cluster = theme.get("cluster") or []
+        if len(cluster) > 1:
+            g_show = " · ".join((c.get("google_query") or "") for c in cluster)
+            g_show = f"({len(cluster)} từ khóa) {g_show}"
+        else:
+            g_show = theme.get("google_query", "")
         rows.append({
             "pid": pid,
-            "google": theme.get("google_query", ""),
+            "google": g_show,
             "yt": theme.get("youtube_query", ""),
             "round": (i // len(shuffled)) + 1,
+            "cluster_size": max(1, len(cluster)),
         })
     return assignment_map, rows
+
+
+def clusters_to_themes(clusters):
+    """v1.7.7: [[cặp,...], ...] -> theme dict cho assign_topics_for_run.
+    Mỗi cụm = 1 theme (từ khóa đầu làm google/youtube_query) + khóa "cluster" = cả cụm."""
+    out = []
+    for cl in clusters or []:
+        cl = [dict(c) for c in cl if (c.get("google_query") or "").strip()]
+        if not cl:
+            continue
+        out.append({
+            "google_query": cl[0].get("google_query", ""),
+            "youtube_query": cl[0].get("youtube_query", "") or cl[0].get("google_query", ""),
+            "cluster": cl,
+        })
+    return out
+
+
+def lines_to_themes(clusters):
+    """v1.8.3: MỖI DÒNG = 1 chủ đề riêng (mỗi profile 1 chủ đề khác nhau). Các dòng cùng
+    cụm (cùng khối / cùng dòng gốc) đi kèm trong khóa "related" làm GỢI Ý cho AI dựng chuỗi
+    hành động có logic — KHÔNG còn bắt mọi profile dùng chung 1 bộ (bug v1.7.7)."""
+    out = []
+    for cl in clusters or []:
+        cl = [c for c in cl if (c.get("google_query") or "").strip()]
+        for i, c in enumerate(cl):
+            out.append({
+                "google_query": c.get("google_query", ""),
+                "youtube_query": c.get("youtube_query", "") or c.get("google_query", ""),
+                "related": [x.get("google_query", "") for j, x in enumerate(cl) if j != i],
+            })
+    return out
+
+
+class _NullCtx:
+    """Context giả để dựng WarmupWorkflow chỉ nhằm sinh kế hoạch (không mở trình duyệt)."""
+
+    def on(self, *a, **k):
+        return None
+
+
+def build_session_plan(topic, related=None, brain_type="none", lang="en", phase="clean", skip_youtube=False):
+    """v1.8.4: sinh TRƯỚC kế hoạch 8-14 bước của 1 phiên (cùng prompt/parse với lúc chạy) để
+    hộp xác nhận hiện cho user xem, rồi phiên dùng ĐÚNG kế hoạch đó. -> (steps, nguồn)."""
+    brain = None
+    if brain_type and brain_type != "none":
+        try:
+            brain = BrainManager.get_brain(brain_type)
+        except Exception:
+            brain = None
+    # v1.8.9: truyền pha + 'Bỏ qua YouTube' để kế hoạch chỉ gồm nền tảng phiên đó làm được
+    wf = WarmupWorkflow(context=_NullCtx(), brain=brain, keyword_lang=lang, phase=phase or "clean",
+                        skip_youtube=bool(skip_youtube))
+    wf.related_keywords = [r for r in (related or []) if (r or "").strip()][:10]
+    plan = wf._safe_ask_plan(topic_hint=topic, related=wf.related_keywords) if brain else None
+    if plan:
+        return plan, "AI"
+    return wf._local_plan_steps(topic), "dự phòng"
+
+
+def plan_summary(steps, limit=4):
+    """'14 bước · google → youtube → maps …' cho cột bảng."""
+    if not steps:
+        return ""
+    chain = " → ".join(s.get("platform", "?") for s in steps[:limit])
+    return f"{len(steps)} bước · {chain}" + (" …" if len(steps) > limit else "")
+
+
+def resolve_run_brain(brain_type, log=print):
+    """v1.8.3: trước khi chạy, thử AI đã chọn; nếu nó không trả lời (hết số dư/quá tải...)
+    thì tự dùng AI kế tiếp CÒN SỐNG trong .env. -> tên brain dùng thật ('none' nếu tất cả chết)."""
+    if not brain_type or brain_type in ("none", "local"):
+        return brain_type or "none"
+    cands = [brain_type] + [b for b in _brain_candidates_from_env() if b != brain_type]
+    brain, name, why = _pick_live_brain(cands, log=log)
+    if brain is None:
+        log(f"[System] [!] Không AI nào trả lời ({why}) - chạy KHÔNG có AI (kế hoạch dự phòng).")
+        return "none"
+    if name != brain_type:
+        log(f"[System] AI Brain '{brain_type}' không trả lời -> tự dùng '{name}' (đang sống) cho phiên này.")
+    else:
+        log(f"[System] AI Brain '{name}' trả lời bình thường.")
+    return name
+
+
+def order_cluster_for_profile(cluster, last_used=None, rng=None):
+    """v1.7.7: thứ tự dùng cụm cho 1 phiên của 1 profile — NỐI TIẾP giữa các phiên.
+
+    Từ khóa CHƯA DÙNG BAO GIỜ đứng đầu (xáo ngẫu nhiên -> mỗi profile 1 thứ tự riêng),
+    sau đó những từ khóa đã dùng theo lần dùng CŨ NHẤT trước -> hết vòng tự quay lại.
+    last_used: {google_query_lower: iso_time} (DatabaseHandler.get_keyword_last_used).
+    """
+    rng = rng or random
+    last_used = last_used or {}
+    fresh, used = [], []
+    for c in cluster or []:
+        k = (c.get("google_query") or "").strip().lower()
+        if not k:
+            continue
+        (used if k in last_used else fresh).append(c)
+    rng.shuffle(fresh)
+    used.sort(key=lambda c: last_used.get((c.get("google_query") or "").strip().lower(), ""))
+    return fresh + used
 
 # v1.5.7: mẫu offline BÙ khi không có AI hoặc AI trả thiếu (vẫn giữ random thật qua rng).
 # v1.6.1: mẫu offline theo NGÔN NGỮ (vi/en/ja/ko) nằm trong src/lang_profiles.py.
@@ -375,13 +669,32 @@ def _local_topic_variants(seed, n, rng=None, lang="en"):
     return out[:n]
 
 
+def _custom_brain_types():
+    """v1.7.6: brain 'custom:<TEN>' cho mọi key có Endpoint + Model (cổng tương thích OpenAI)."""
+    try:
+        return [f"custom:{k}" for k, _ep, model in api_vault.custom_providers() if model]
+    except Exception:
+        return []
+
+
 def _detect_brain_type_from_env():
     """v1.5.9: khi ô 'AI Brain' để 'none' nhưng .env có key -> tự chọn 1 brain để SINH chủ đề.
 
-    Thứ tự ưu tiên: gemini -> openai -> qwen. Trả về tên brain hoặc None nếu không có key.
+    Thứ tự ưu tiên (v1.7.2): claude -> gemini -> openai -> qwen. Claude đứng đầu vì key
+    Gemini free hay 504 (~15s rồi mới chịu thua) và OpenAI dễ hết credit — để nó đầu hàng
+    thì mỗi lần Sinh đều phí 15s rồi rơi về mẫu offline.
+    Trả về tên brain hoặc None nếu không có key.
     (Chỉ dùng cho tính năng 'Sinh chủ đề'; KHÔNG đổi brain dùng khi chạy warmup.)
     """
+    # v1.7.6: cổng tự đặt (key + Endpoint + Model) đứng ĐẦU — user tự thêm là muốn dùng.
+    _cust = _custom_brain_types()
+    if _cust:
+        return _cust[0]
     try:
+        # Claude chỉ dùng được khi CÓ CẢ key lẫn endpoint (cổng tương thích OpenAI).
+        for _n in ("CLAUDE_API_KEY", "CLAUDE_LAU"):
+            if os.getenv(_n) and os.getenv(f"{_n}_ENDPOINT"):
+                return "claude-sonnet"
         if os.getenv("GEMINI_API_KEY"):
             return "gemini"
         if os.getenv("OPENAI_API_KEY"):
@@ -391,6 +704,81 @@ def _detect_brain_type_from_env():
     except Exception:
         pass
     return None
+
+
+def _brain_candidates_from_env():
+    """v1.7.3: TOÀN BỘ brain thử được, theo đúng thứ tự ưu tiên của
+    _detect_brain_type_from_env (claude -> gemini -> openai -> qwen).
+
+    Trước đây chỉ lấy MỘT brain: nó hết số dư là rơi thẳng xuống mẫu offline, không hề thử
+    provider còn lại, và lý do thật bị nuốt. (Đo 31/10/2026: claude 403 hết số dư, gemini
+    504, openai 429 hết credit — cả ba cùng chết nên user chỉ nhận template ghép seed.)
+    """
+    out = list(_custom_brain_types())
+    try:
+        for _n in ("CLAUDE_API_KEY", "CLAUDE_LAU"):
+            if os.getenv(_n) and os.getenv(f"{_n}_ENDPOINT"):
+                out.append("claude-sonnet")
+                break
+        if os.getenv("GEMINI_API_KEY"):
+            out.append("gemini")
+        if os.getenv("OPENAI_API_KEY"):
+            out.append("openai")
+        if os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY"):
+            out.append("qwen-max")
+    except Exception:
+        pass
+    return out
+
+
+def _explain_brain_error(err):
+    """Dịch lỗi thô của SDK sang 1 câu đọc là hiểu phải làm gì (nạp tiền hay đổi key)."""
+    t = str(err or "").lower()
+    if not t:
+        return "không rõ lý do"
+    if "insufficient_balance" in t or "insufficient account balance" in t:
+        return "HẾT SỐ DƯ tài khoản cổng API"
+    if "credit_balance_exhausted" in t or "insufficient_quota" in t or "no credits" in t:
+        return "HẾT CREDIT"
+    if "429" in t or "rate limit" in t or "quota" in t:
+        return "bị giới hạn tần suất / hết quota"
+    if "504" in t or "deadline" in t or "timeout" in t or "timed out" in t:
+        return "quá hạn chờ (server không trả lời kịp)"
+    if "401" in t or "invalid_api_key" in t or "unauthorized" in t or "authentication" in t:
+        return "KEY SAI hoặc đã bị thu hồi"
+    if "404" in t or "not found" in t:
+        return "model/endpoint không tồn tại"
+    if "connect" in t or "refused" in t or "network" in t:
+        return "không kết nối được tới server"
+    return str(err).strip().replace("\n", " ")[:120]
+
+
+def _pick_live_brain(candidates, log=None):
+    """v1.7.3: thử lần lượt tới khi gặp brain THỰC SỰ trả lời được.
+
+    -> (brain, tên, "") khi có brain sống; (None, "", lý_do_cuối) khi tất cả đều chết.
+    Mỗi ứng viên tốn đúng 1 lượt hỏi siêu ngắn — brain chết kiểu hết tiền đáp trong ~1s.
+    """
+    _log = log if callable(log) else (lambda _m: None)
+    last = ""
+    for bt in candidates:
+        try:
+            brain = BrainManager.get_brain(bt)
+        except Exception as e:
+            last = _explain_brain_error(e)
+            _log(f"[!] AI '{bt}': không khởi tạo được ({last}) — thử brain kế tiếp.")
+            continue
+        try:
+            reply = (brain.ask_text("Reply with the single word: OK") or "").strip()
+        except Exception as e:
+            setattr(brain, "last_error", str(e))
+            reply = ""
+        if reply:
+            _log(f"[+] AI '{bt}' trả lời được — dùng brain này để sinh chủ đề.")
+            return brain, bt, ""
+        last = _explain_brain_error(getattr(brain, "last_error", ""))
+        _log(f"[!] AI '{bt}' KHÔNG dùng được: {last} — thử brain kế tiếp.")
+    return None, "", last
 
 
 def generate_topics_from_seed(seed, n, brain=None, rng=None, log=None, lang="en"):
@@ -432,10 +820,10 @@ def generate_topics_from_seed(seed, n, brain=None, rng=None, log=None, lang="en"
     if brain is not None and seed:
         try:
             prompt = (
-                "You are a real person researching a topic online. From ONE seed topic, "
+                "You are a real person researching a topic online. From the seed topic(s) below, "
                 "think of several DIFFERENT, practically-related sub-topics a real user "
-                "would actually search for around it.\n"
-                f"Seed topic: {seed}\n"
+                "would actually search for around them.\n"
+                f"Seed topic(s): {seed}\n"
                 f"List exactly {n} different related sub-topics.\n"
                 "Mix BOTH kinds, naturally:\n"
                 "- Real-world actions: where to buy gear/shoes/clothes, shops or places "
@@ -482,6 +870,96 @@ def generate_topics_from_seed(seed, n, brain=None, rng=None, log=None, lang="en"
             if len(pairs) >= n:
                 break
     return pairs[:n]
+
+
+def generate_topics_for_seeds(seeds, n, brain=None, rng=None, log=None, lang="en",
+                              deadline_ts=None, progress=None):
+    """v1.7.1: sinh n chủ đề con từ NHIỀU dòng gốc — MỖI DÒNG LÀ 1 CHỦ ĐỀ RIÊNG.
+
+    Trước đây (v1.7.0) mọi dòng bị nối thành 1 chuỗi ("Health, Buy clothes, ...") rồi mới
+    sinh -> chủ đề nào cũng vác cả cụm. Giờ chia HẠN NGẠCH cho từng dòng rồi gọi
+    `generate_topics_from_seed` riêng cho dòng đó (tái dùng nguyên prompt/parse/bù-offline).
+
+    - Hạn ngạch round-robin: n // M cho mỗi dòng, dư chia dần từ dòng đầu.
+      Nhiều dòng hơn số chủ đề cần (M > n) -> chỉ n DÒNG ĐẦU được sinh (có log nhắc).
+    - `deadline_ts`: tới hạn thì các dòng còn lại chuyển sang mẫu offline (tức thời) để
+      không bao giờ vượt hàng rào chờ của UI.
+    - Mỗi dict trả về có thêm khóa "seed" = dòng gốc sinh ra nó (chỉ để hiển thị).
+    - Luôn trả ĐÚNG n dict, Google phân biệt trên TOÀN BỘ danh sách.
+    """
+    rng = rng or random
+    lang = lang_profiles.norm(lang)
+    _log = log if callable(log) else (lambda _m: None)
+    try:
+        n = int(n)
+    except (ValueError, TypeError):
+        n = 0
+    seeds = [str(s or "").strip() for s in (seeds or [])]
+    seeds = [s for s in seeds if s]
+    if n <= 0:
+        return []
+    if not seeds:
+        # Không có dòng nào -> giữ hành vi cũ (mẫu mặc định theo ngôn ngữ).
+        return generate_topics_from_seed("", n, brain=brain, rng=rng, log=log, lang=lang)
+
+    m = len(seeds)
+    if m > n:
+        _log(f"[!] Có {m} dòng chủ đề gốc nhưng chỉ cần {n} chủ đề (= số profile đang chọn) "
+             f"-> chỉ sinh cho {n} dòng ĐẦU.")
+    base, extra = (n // m), (n % m)
+    quotas = [base + (1 if i < extra else 0) for i in range(m)]
+
+    out, seen = [], set()
+
+    def _absorb(items, seed_text, limit):
+        """Nhận tối đa `limit` chủ đề CHƯA trùng toàn cục. -> số đã nhận."""
+        taken = 0
+        for it in items:
+            if taken >= limit or len(out) >= n:
+                break
+            g = (it.get("google_query") or "").strip()
+            if not g or g.lower() in seen:
+                continue
+            seen.add(g.lower())
+            it = dict(it)
+            it["seed"] = seed_text
+            out.append(it)
+            taken += 1
+        return taken
+
+    for i, seed in enumerate(seeds):
+        quota = quotas[i]
+        if quota <= 0:
+            continue
+        use_brain = brain
+        if brain is not None and deadline_ts and time.time() > float(deadline_ts) - 2:
+            use_brain = None
+            _log(f"[!] Hết thời gian chờ AI - dòng '{seed}' dùng mẫu offline.")
+        if callable(progress):
+            try:
+                progress(i + 1, m)
+            except Exception:
+                pass
+        _log(f"[*] Dòng {i + 1}/{m}: '{seed}' -> cần {quota} chủ đề con.")
+        got = _absorb(generate_topics_from_seed(seed, quota, brain=use_brain, rng=rng,
+                                                log=log, lang=lang), seed, quota)
+        # Trùng với dòng trước -> bù thêm bằng mẫu offline CỦA CHÍNH DÒNG NÀY.
+        if got < quota:
+            fill = [{"google_query": g, "youtube_query": g}
+                    for g in _local_topic_variants(seed, (quota - got) * 4 + 4, rng, lang=lang)]
+            _absorb(fill, seed, quota - got)
+
+    # Vẫn thiếu (dòng nào đó cạn mẫu) -> bù lần lượt từ các dòng cho đủ n.
+    idx, stale = 0, 0
+    while len(out) < n and stale <= len(seeds):
+        seed = seeds[idx % len(seeds)]
+        before = len(out)
+        _absorb([{"google_query": g, "youtube_query": g}
+                 for g in _local_topic_variants(seed, n * 3 + 5, rng, lang=lang)],
+                seed, n - len(out))
+        stale = 0 if len(out) > before else stale + 1
+        idx += 1
+    return out[:n]
 
 
 def run_single_profile(api, profile_id, profile_name, themes, slot_index, screen_w, screen_h, skip_youtube, skip_random_keywords, brain_type="none", phase="clean", fixed_target_s=0, daily_seconds=0, pinned_theme="", assigned_theme=None, keyword_lang="en"):
@@ -546,8 +1024,11 @@ def run_single_profile(api, profile_id, profile_name, themes, slot_index, screen
         
         if not ws_url:
             _cyc["status"] = "error"  # v1.4.0: mở profile thất bại — vẫn ghi chu trình
-            _cyc["error"] = "Khong lay duoc WebSocket URL"
+            _why = getattr(api, "last_error", "") or ""
+            _cyc["error"] = ("Khong lay duoc WebSocket URL" + (f" - {_why}" if _why else ""))[:300]
             print(f"[{profile_name}] ❌ Lỗi: Không thể lấy WebSocket URL.")
+            if _why:
+                print(f"[{profile_name}] ❌ Nguyên nhân: {_why}")
             return
 
         controller = BrowserController(ws_url)
@@ -561,12 +1042,34 @@ def run_single_profile(api, profile_id, profile_name, themes, slot_index, screen
             
             # v1.5.7: PHÂN BỔ CHỦ ĐỀ — chủ đề được chia sẵn cho từng profile ở lớp UI
             # (assign_topics_for_run) nên ở đây chỉ cần nhận việc, không random nữa.
+            _cluster_ordered = []
             if assigned_theme:
                 session_theme = {
                     "google_query": assigned_theme.get("google_query", ""),
                     "youtube_query": assigned_theme.get("youtube_query", ""),
                 }
-                print(f"[{profile_name}] 🎯 Chủ đề PHÂN BỔ: {session_theme['google_query']}")
+                # v1.7.7: profile nhận TRỌN CỤM -> sắp thứ tự nối tiếp phiên trước (chưa dùng trước)
+                _cl = assigned_theme.get("cluster") or []
+                if len(_cl) > 1:
+                    try:
+                        _lu = db.get_keyword_last_used(
+                            profile_id, [c.get("google_query", "") for c in _cl])
+                    except Exception:
+                        _lu = {}
+                    _cluster_ordered = order_cluster_for_profile(_cl, _lu)
+                    if _cluster_ordered:
+                        session_theme = {
+                            "google_query": _cluster_ordered[0].get("google_query", ""),
+                            "youtube_query": _cluster_ordered[0].get("youtube_query", "")
+                            or _cluster_ordered[0].get("google_query", ""),
+                        }
+                        _n_fresh = sum(1 for c in _cl
+                                       if (c.get("google_query") or "").strip().lower() not in _lu)
+                        print(f"[{profile_name}] 🎯 Cụm {len(_cluster_ordered)} từ khóa "
+                              f"({_n_fresh} chưa dùng lần nào): "
+                              + " · ".join(c.get("google_query", "") for c in _cluster_ordered))
+                if not _cluster_ordered:
+                    print(f"[{profile_name}] 🎯 Chủ đề PHÂN BỔ: {session_theme['google_query']}")
             # v1.5.3: GHIM CHỦ ĐỀ — người dùng nhập tay thì mọi profile của phiên dùng đúng
             # chủ đề đó (bỏ qua random.choice trong danh sách).
             elif pinned_theme:
@@ -591,6 +1094,23 @@ def run_single_profile(api, profile_id, profile_name, themes, slot_index, screen
                 should_stop=STOP_EVENT.is_set,
                 keyword_lang=keyword_lang
             )
+            # v1.7.7: CỤM TỪ KHÓA đã duyệt -> dùng nguyên văn, lần lượt (gán sau khi tạo,
+            # giống session_deadline_s, để không đổi chữ ký WarmupWorkflow).
+            warmup.keyword_cluster = _cluster_ordered
+            # v1.8.4: kế hoạch đã hiện ở hộp xác nhận -> dùng đúng nó (không sinh lại)
+            _plan = list((assigned_theme or {}).get("plan") or [])
+            if _plan:
+                warmup.plan_steps = _plan
+                print(f"[{profile_name}] 🗺️ Kế hoạch đã duyệt ({len(_plan)} bước): "
+                      + " → ".join(f"[{st.get('platform')}] {st.get('query')}" for st in _plan[:4])
+                      + (" …" if len(_plan) > 4 else ""))
+            # v1.8.3: từ khóa liên quan (cùng cụm) -> AI dệt vào kế hoạch có logic
+            _rel = list((assigned_theme or {}).get("related") or [])
+            if _rel:
+                random.shuffle(_rel)
+                warmup.related_keywords = _rel[:10]
+                print(f"[{profile_name}] 🎯 Chủ đề riêng: {session_theme['google_query']} "
+                      f"(+{len(warmup.related_keywords)} từ khóa liên quan làm gợi ý cho AI)")
             # v1.5.2: TRẦN THỜI GIAN PHIÊN. Nếu người dùng GHIM "Mục tiêu vòng" (>0) thì mốc đó
             # vừa là mục tiêu ⏰ vừa là giới hạn cứng; để 0 -> warmup tự random 15-30 phút/phiên.
             warmup.session_deadline_s = int(fixed_target_s) if fixed_target_s and fixed_target_s > 0 else 0
@@ -637,6 +1157,13 @@ def run_single_profile(api, profile_id, profile_name, themes, slot_index, screen
         # v1.4.0: chốt số liệu chu trình — worker_wrapper (finally ngoài) đọc để ghi DB.
         # return sớm (ws_url lỗi) cũng đi qua đây -> duration vẫn được ghi.
         try:
+            # v1.8.9: ghi số hành động ĐÃ CHẠY THẬT (trước đây ghi số dự định 4-8 dù phiên hết giờ sau 2)
+            _done = getattr(warmup, "actions_done", None)
+            if isinstance(_done, int):
+                _cyc["actions"] = _done
+        except Exception:
+            pass   # warmup chưa kịp tạo (lỗi mở profile) -> giữ số cũ
+        try:
             _cyc["duration_s"] = round(time.time() - _cyc_t0, 1)
             _cyc["finish_str"] = datetime.datetime.now().isoformat(timespec="seconds")
             if STOP_EVENT.is_set():
@@ -679,6 +1206,21 @@ def _stagger_startup(slot, slot_key, profile_id):
 
 
 def worker_wrapper(app_instance, profile_id, themes, slots_queue, screen_w, screen_h, skip_youtube, skip_random_keywords, browser_type=BROWSER_GPM, api_port="", brain_type="none", phase="clean", fixed_target_s=0, daily_seconds=0, pinned_theme="", keyword_lang="en"):
+    # v1.8.1: GIỮ PROXY TRƯỚC rồi mới lấy luồng (slot) -> không luồng nào ngồi giữ slot chờ
+    # proxy; không deadlock vì ai giữ slot cũng đã giữ proxy và sẽ chạy xong rồi nhả cả hai.
+    if STOP_EVENT.is_set():
+        print(f"[Skip] Người dùng đã yêu cầu dừng - bỏ qua profile {profile_id[:8]}.")
+        return
+    if not _acquire_proxy(profile_id):
+        print(f"[Skip] Dừng trong lúc chờ proxy rảnh - bỏ qua profile {profile_id[:8]}.")
+        return
+    try:
+        return _worker_body(app_instance, profile_id, themes, slots_queue, screen_w, screen_h, skip_youtube, skip_random_keywords, browser_type, api_port, brain_type, phase, fixed_target_s, daily_seconds, pinned_theme, keyword_lang)
+    finally:
+        _release_proxy(profile_id)
+
+
+def _worker_body(app_instance, profile_id, themes, slots_queue, screen_w, screen_h, skip_youtube, skip_random_keywords, browser_type=BROWSER_GPM, api_port="", brain_type="none", phase="clean", fixed_target_s=0, daily_seconds=0, pinned_theme="", keyword_lang="en"):
     if STOP_EVENT.is_set():
         print(f"[Skip] Người dùng đã yêu cầu dừng - bỏ qua profile {profile_id[:8]}.")
         return
@@ -722,6 +1264,7 @@ def worker_wrapper(app_instance, profile_id, themes, slots_queue, screen_w, scre
             print(f"[!] Không khởi tạo được API anti-detect cho {profile_id[:8]}: {e}")
             return  # finally bên dưới vẫn chạy -> trả slot + dọn SLOT_* maps
         SLOT_LABEL[slot_key] = profile_name
+        SLOT_API[slot_key] = (api, profile_id)   # v1.8.9: cho watchdog biết đóng profile nào khi slot treo
 
         app_instance.update_tab_name(slot, profile_name)
 
@@ -752,6 +1295,8 @@ def worker_wrapper(app_instance, profile_id, themes, slots_queue, screen_w, scre
                 print(f"[!] log_cycle lỗi (bỏ qua): {e}")
         SLOT_PROFILE.pop(slot_key, None)
         SLOT_LABEL.pop(slot_key, None)
+        SLOT_API.pop(slot_key, None)
+        _WATCHDOG_DONE.discard((slot_key, profile_id))
         app_instance.update_tab_name(slot, f"Slot {slot + 1}")
         slots_queue.put(slot)
 
@@ -1203,8 +1748,9 @@ class AutomationApp:
         ttk.Label(card_cfg, text="AI Brain:").grid(row=2, column=0, sticky="w", pady=(8, 0))
         self.var_brain_type = tk.StringVar(value="none")
         self.cbo_brain = ttk.Combobox(card_cfg, textvariable=self.var_brain_type,
-                                      values=["none", "gemini", "openai", "qwen-max", "qwen-flash", "local"],
-                                      state="readonly", width=13)
+                                      values=self._brain_values(),
+                                      state="readonly", width=22,
+                                      postcommand=self._refresh_brain_values)
         self.cbo_brain.grid(row=2, column=1, sticky="w", padx=(10, 0), pady=(8, 0))
         self.lbl_brain_hint = ttk.Label(card_cfg, text="(Tắt AI - dùng từ khóa thủ công)", style="Muted.TLabel")
         self.lbl_brain_hint.grid(row=3, column=1, sticky="w", padx=(10, 0))
@@ -1335,18 +1881,65 @@ class AutomationApp:
             ttk.Radiobutton(pin_line, text=lang_profiles.LANG_LABELS[_code],
                             value=_code, variable=self.var_kw_lang,
                             command=self._on_kw_lang_changed).pack(side="left", padx=(8, 0))
-        ttk.Label(pin_line, text="Chủ đề gốc:").pack(side="left", padx=(18, 0))
+        # v1.7.3: nhãn cũ "(theo số profile)" chính là lời hứa gây thất vọng — số chủ đề
+        # giờ do SỐ DÒNG GỐC × ô bên cạnh quyết định. Pack side=right nên nút nằm ngoài cùng
+        # phải, rồi Spinbox, rồi nhãn lần lượt lùi sang trái.
+        self.btn_gen_topics = ttk.Button(pin_line, text="Sinh chủ đề con",
+                                         command=self.on_generate_topics, style="Tool.TButton", width=18)
+        self.btn_gen_topics.pack(side="right")
+        self.spin_topics_per_seed = ttk.Spinbox(pin_line, from_=1, to=20, width=4)
+        self.spin_topics_per_seed.pack(side="right", padx=(8, 8))
+        try:
+            self.spin_topics_per_seed.set(max(1, int(self.cfg.get("topics_per_seed", 5))))
+        except (ValueError, TypeError):
+            self.spin_topics_per_seed.set(5)
+        ttk.Label(pin_line, text="Số chủ đề/dòng:").pack(side="right")
+
+        # v1.7.0: ô "Chủ đề gốc" nay là Text NHIỀU DÒNG (mỗi dòng 1 chủ đề) thay cho Entry 1 dòng
+        # — người dùng muốn Enter xuống dòng, mỗi dòng 1 chủ đề. Nhãn "Chủ đề gốc:" nằm CÙNG frame
+        # cha (seed_line) với Text để code/test dựa vào ent_pinned_theme.master vẫn thấy nhãn.
+        # Giữ nguyên tên thuộc tính ent_pinned_theme + var_pinned_theme (var là kênh GHI tương
+        # thích: .set() đổ vào Text, 1 chiều, không recursion — _pinned_theme_text()/_seed_themes()
+        # đọc THẲNG từ Text).
+        seed_line = ttk.Frame(card_kw)
+        seed_line.pack(fill="x", pady=(4, 0))
+        ttk.Label(seed_line, text="Chủ đề gốc:").pack(side="left", anchor="n", pady=(3, 0))
         self.var_pinned_theme = tk.StringVar(value="")
-        self.ent_pinned_theme = ttk.Entry(pin_line, textvariable=self.var_pinned_theme)
-        self.ent_pinned_theme.pack(side="left", fill="x", expand=True, padx=(6, 6))
-        self.btn_gen_topics = ttk.Button(pin_line, text="Sinh chủ đề (theo số profile)",
-                                         command=self.on_generate_topics, style="Tool.TButton", width=26)
-        self.btn_gen_topics.pack(side="left")
+        _seed_sb = ttk.Scrollbar(seed_line, orient="vertical")
+        self.ent_pinned_theme = tk.Text(seed_line, height=3, wrap="word", relief="flat",
+                                        bg=self.C_FIELD, fg=self.C_FG, insertbackground=self.C_FG,
+                                        highlightthickness=1, highlightbackground=self.C_BORDER,
+                                        font=("Segoe UI", 10), padx=6, pady=4, undo=True,
+                                        yscrollcommand=_seed_sb.set)
+        _seed_sb.config(command=self.ent_pinned_theme.yview)
+        _seed_sb.pack(side="right", fill="y", padx=(6, 0))
+        self.ent_pinned_theme.pack(side="left", fill="x", expand=True, padx=(6, 0))
+
+        def _seed_wheel(event):
+            self.ent_pinned_theme.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            return "break"
+        self.ent_pinned_theme.bind("<MouseWheel>", _seed_wheel)
+
+        # Kênh tương thích: var_pinned_theme.set(x) -> đổ x vào Text (1 chiều). Gõ tay trong Text
+        # KHÔNG kích trace nên nội dung không bị xoá. Áp dụng/clear vẫn gọi var.set("").
+        def _sync_seed_var_to_text(*_a):
+            try:
+                new = self.var_pinned_theme.get()
+                cur = self.ent_pinned_theme.get("1.0", "end-1c")
+                if cur != new:
+                    self.ent_pinned_theme.delete("1.0", "end")
+                    if new:
+                        self.ent_pinned_theme.insert("1.0", new)
+            except Exception:
+                pass
+        self.var_pinned_theme.trace_add("write", _sync_seed_var_to_text)
+
         _wrap_label(ttk.Label(
             card_kw,
-            text="Sinh = AI tạo mỗi profile 1 chủ đề con (xem trước → áp dụng). "
-                 "Để TRỐNG ô gốc + bấm Sinh = bot tự chọn chủ đề nền. "
-                 "Để chữ ô gốc + bấm CHẠY (không Sinh) = ghim mọi profile vào đúng chủ đề đó.",
+            text="Mỗi dòng 1 chủ đề gốc. Bấm 'Sinh chủ đề con' → mỗi dòng nở ra N chủ đề "
+                 "(4 dòng × 5 = 20). Khi CHẠY: mỗi profile nhận 1 chủ đề/phiên rồi bot tự bung "
+                 "thành 8-14 bước tìm kiếm; chủ đề dư xoay vòng sang phiên sau. "
+                 "Để TRỐNG = chạy danh sách dưới.",
             style="Muted.TLabel", justify="left",
         )).pack(fill="x", pady=(3, 0))
 
@@ -1355,13 +1948,14 @@ class AutomationApp:
         # Text — không canvas, không bind_all. Tùy chọn tách YouTube: "chủ đề google | từ khóa youtube".
         _wrap_label(ttk.Label(
             card_kw,
-            text="DANH SÁCH CHỦ ĐỀ — mỗi dòng 1 chủ đề (Enter xuống dòng) · "
-                 "tách từ khóa YouTube (tùy chọn): chủ đề google | từ khóa youtube",
+            text="DANH SÁCH CHỦ ĐỀ — mỗi dòng 1 từ khóa · các dòng liền nhau = 1 CỤM, "
+                 "cách cụm bằng 1 dòng trống · mỗi profile dùng TRỌN 1 cụm (lần lượt, nối tiếp phiên sau) · "
+                 "tách YouTube (tùy chọn): google | youtube",
             style="Accent.TLabel", justify="left",
         )).pack(fill="x", pady=(6, 1))
         kw_box = ttk.Frame(card_kw)
         kw_box.pack(fill="both", expand=True, pady=(2, 2))
-        self.kw_text = tk.Text(kw_box, height=4, wrap="word", relief="flat",
+        self.kw_text = tk.Text(kw_box, height=3, wrap="word", relief="flat",
                                bg=self.C_FIELD, fg=self.C_FG, insertbackground=self.C_FG,
                                highlightthickness=1, highlightbackground=self.C_BORDER,
                                font=("Segoe UI", 10), padx=6, pady=4, undo=True)
@@ -1467,18 +2061,26 @@ class AutomationApp:
                 return
             self._prof_overhead = max(
                 60, self._card_prof.winfo_reqheight() - self.prof_canvas.winfo_reqheight() + 34)
+            # v1.7.0: ô 'Chủ đề gốc' nay nhiều dòng -> thẻ chủ đề cao hơn. Tính reqheight thật
+            # của ngăn giữa để (a) BỎ pane_sash đã lưu nếu nó làm ngăn giữa quá thấp (ô 'DANH
+            # SÁCH CHỦ ĐỀ' bị che — lỗi người dùng gặp), (b) mặc định cho ngăn giữa đủ chỗ.
+            panes = self.main_pane.panes()
+            kw_req = (self.root.nametowidget(str(panes[1])).winfo_reqheight()
+                      if len(panes) > 1 else 200)
+            # Ngăn giữa PHẢI đủ cao để thấy CẢ ô 'Chủ đề gốc' (nhiều dòng) LẪN 'DANH SÁCH CHỦ ĐỀ'.
+            # Sàn gắn với chiều cao THẬT của thẻ (không cap thấp như trước) nên pane_sash đã lưu
+            # mà quá thấp (ô danh sách bị che — lỗi người dùng gặp) sẽ bị BỎ, tự tính lại.
+            kw_floor = max(260, kw_req - 10)
             saved = self.cfg.get("pane_sash") or []
             s0 = s1 = None
             if (isinstance(saved, list) and len(saved) == 2
                     and all(isinstance(v, int) for v in saved)
-                    and 150 <= saved[0] < saved[1] - 120 and saved[1] <= total - 80):
+                    and 150 <= saved[0] < saved[1] - 120 and saved[1] <= total - 80
+                    and (saved[1] - saved[0]) >= kw_floor):
                 s0, s1 = saved
             if s0 is None:
-                panes = self.main_pane.panes()
-                kw_req = (self.root.nametowidget(str(panes[1])).winfo_reqheight()
-                          if len(panes) > 1 else 200)
-                kw_h = min(260, max(170, kw_req))
-                rest = max(300, total - kw_h)
+                kw_h = min(440, max(300, kw_req))
+                rest = max(280, total - kw_h)
                 s0 = int(rest * 0.68)
                 s1 = s0 + kw_h
             self.main_pane.sashpos(0, s0)
@@ -1493,6 +2095,10 @@ class AutomationApp:
         v1.4.1: mục tiêu dùng số RANDOM của chính vòng đang chạy (SLOT_CYCLE_INFO['target_s']),
         chỉ rơi về mục tiêu cố định khi vòng chưa kịp random (hoặc bản cũ không ghi)."""
         if self._running and self._active_slots:
+            try:
+                watchdog_rescue()   # v1.8.9: slot im lặng > 15 phút -> đóng profile để giải cứu luồng treo
+            except Exception:
+                pass
             parts = []
             now = time.time()
             worst = "green"
@@ -1525,6 +2131,13 @@ class AutomationApp:
                     parts.append(f"{key}:{name} 🔴{age}s{cyc_txt}{mark}")
                     worst = "red"
             text = " · ".join(parts) if parts else "Đang khởi động luồng..."
+            # v1.8.2: LUÔN hiện trạng thái chặn trùng proxy + số profile đang chờ proxy rảnh
+            if _PROXY_STATE.get("on"):
+                n_w = len(_PROXY_WAITING)
+                text += (f"  |  Chặn trùng proxy: BẬT ({_PROXY_STATE.get('n_proxy', 0)} proxy) · "
+                         + (f"{n_w} profile chờ proxy rảnh" if n_w else "không ai phải chờ"))
+            elif _PROXY_STATE.get("why"):
+                text += f"  |  Chặn trùng proxy: TẮT ({_PROXY_STATE['why']})"
             # v1.3.7: trạng thái chạy bình thường = accent 2 (xá cù non), không trùng màu idle
             fg = {"green": self.C_ACCENT_2, "yellow": self.C_HB_YELLOW,
                   "red": self.C_HB_RED}[worst]
@@ -1903,6 +2516,7 @@ class AutomationApp:
     # ── v1.5.7 — bảng phân bổ chủ đề (1 dòng = 1 profile, cột Chủ đề = thứ được chia đều)
     ASSIGN_COLUMNS = ("name", "id", "group", "google", "yt", "round")
     ASSIGN_HEADERS = {
+        "plan": "Kế hoạch (AI)",
         "name": "Tài khoản",
         "id": "ID",
         "group": "Nhóm",
@@ -1910,7 +2524,8 @@ class AutomationApp:
         "yt": "Từ khóa (YouTube)",
         "round": "Vòng",
     }
-    ASSIGN_WIDTHS = {"name": 170, "id": 80, "group": 130, "google": 280, "yt": 220, "round": 56}
+    ASSIGN_WIDTHS = {"name": 170, "id": 80, "group": 130, "google": 280, "yt": 220, "round": 56,
+                     "plan": 230}  # v1.8.4: "plan" chỉ có ở hộp xác nhận
     ASSIGN_NUM_COLS = ("round",)
 
     def _create_stage_tab(self):
@@ -2292,6 +2907,32 @@ class AutomationApp:
         except Exception:
             pass
 
+    def _prepare_plans(self, amap, brain_type, lang, out, phase="clean", skip_youtube=False):
+        """v1.8.4 (thread nền, KHÔNG chạm Tk): dò AI còn sống 1 lần rồi sinh kế hoạch cho
+        từng profile, ghi dần vào `out[pid] = {"plan", "src"}` (hộp xác nhận poll để hiện)."""
+        try:
+            name = resolve_run_brain(brain_type)
+        except Exception as e:
+            print(f"[!] Không dò được AI ({e}) - kế hoạch dự phòng.")
+            name = "none"
+        self._plan_brain = name
+        cache = {}
+
+        def one(pid):
+            th = amap.get(pid) or {}
+            key = (th.get("google_query", ""), tuple(th.get("related") or []))
+            try:
+                if key not in cache:
+                    cache[key] = build_session_plan(th.get("google_query", ""), th.get("related"), name, lang,
+                                                    phase, skip_youtube)
+                plan, src = cache[key]
+                out[pid] = {"plan": plan, "src": src}
+            except Exception as e:
+                out[pid] = {"plan": [], "src": f"lỗi: {str(e)[:60]}"}
+
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            list(ex.map(one, list(amap)))
+
     def show_assignment_confirm(self, rows, pinned=False):
         """Dialog chặn trước khi chạy: hiện rõ từng profile nhận chủ đề nào.
 
@@ -2302,7 +2943,8 @@ class AutomationApp:
         win = tk.Toplevel(self.root)
         win.title("Xác nhận phân bổ chủ đề")
         win.configure(bg=self.C_CARD)
-        win.geometry("900x480")
+        # v1.8.4: đủ rộng cho cả cột "Kế hoạch (AI)" (tổng ~1370px cột) mà không vượt màn hình
+        win.geometry(f"{min(1400, self.root.winfo_screenwidth() - 40)}x660")
         win.minsize(720, 360)
         try:
             win.transient(self.root)
@@ -2326,6 +2968,12 @@ class AutomationApp:
                 "(ngẫu nhiên, chia đều — không phải 1 chủ đề duy nhất):"
             )
         ttk.Label(win, text=head, padding=(12, 10, 12, 6)).pack(fill="x")
+        # v1.8.2: LUÔN nói rõ lịch chặn trùng proxy của phiên này
+        _pnote = list(getattr(self, "_proxy_note", None) or [])
+        if _pnote:
+            ttk.Label(win, text="\n".join(_pnote[:9]) + ("\n  …" if len(_pnote) > 9 else ""),
+                      style="Accent.TLabel", justify="left",
+                      padding=(12, 0, 12, 6)).pack(fill="x")
 
         # v1.6.9 FIX "không chạy được": nút CHẠY/HỦY + dòng hướng dẫn PHẢI pack
         # side="bottom" TRƯỚC khi pack bảng. Trước đây Treeview pack side="left" +
@@ -2351,9 +2999,20 @@ class AutomationApp:
             padding=(12, 6, 12, 4),
         ).pack(side="bottom", fill="x")
 
+        # v1.8.4: khung KẾ HOẠCH TỪ KHÓA của profile đang chọn (AI sinh trong nền, hiện dần)
+        plan_fr = ttk.Frame(win, padding=(12, 2, 12, 2))
+        plan_fr.pack(side="bottom", fill="x")
+        plan_title = ttk.Label(plan_fr, text="Kế hoạch từ khóa trong phiên — chọn 1 profile để xem",
+                               style="Accent.TLabel")
+        plan_title.pack(anchor="w")
+        plan_txt = tk.Text(plan_fr, height=9, wrap="word", relief="flat", bg=self.C_FIELD, fg=self.C_FG,
+                           font=("Consolas", 9))
+        plan_txt.pack(fill="x")
+        plan_txt.config(state="disabled")
+
         body = ttk.Frame(win)
         body.pack(side="top", fill="both", expand=True, padx=12, pady=4)
-        cols = list(self.ASSIGN_COLUMNS)
+        cols = list(self.ASSIGN_COLUMNS) + ["plan"]
         tree = ttk.Treeview(body, columns=cols, show="headings", selectmode="browse")
         for c in cols:
             tree.heading(c, text=self.ASSIGN_HEADERS.get(c, c))
@@ -2381,10 +3040,64 @@ class AutomationApp:
                         (r.get("google") or "")[:60],
                         (r.get("yt") or "")[:48],
                         r.get("round", ""),
+                        "đang sinh…",
                     ),
                 )
             except Exception:
                 pass
+
+        # v1.8.4: poll kết quả sinh kế hoạch (thread nền ghi vào self._plan_preview)
+        preview = getattr(self, "_plan_preview", None)
+        if preview is None:
+            preview = {}
+
+        def _show_plan(_e=None):
+            sel = tree.selection()
+            if not sel:
+                return
+            i = int(sel[0])
+            pid = rows[i].get("pid") or ""
+            pv = preview.get(pid)
+            name = self._profile_name_of(pid)
+            if pv is None:
+                body_txt = "AI đang sinh kế hoạch cho profile này…"
+                plan_title.config(text=f"Kế hoạch từ khóa — {name}")
+            else:
+                steps = pv.get("plan") or []
+                plan_title.config(text=f"Kế hoạch từ khóa — {name} · {len(steps)} bước · nguồn: {pv.get('src')}"
+                                       " (~80% hành động đi theo thứ tự này)")
+                body_txt = "\n".join(f"{k:>2}. [{st.get('platform')}] {st.get('query')}"
+                                     for k, st in enumerate(steps, 1)) or "(không có bước nào)"
+            plan_txt.config(state="normal")
+            plan_txt.delete("1.0", "end")
+            plan_txt.insert("1.0", body_txt)
+            plan_txt.config(state="disabled")
+
+        tree.bind("<<TreeviewSelect>>", _show_plan)
+
+        def _poll_plans():
+            if not win.winfo_exists():
+                return
+            pending = 0
+            for i, r in enumerate(rows):
+                pv = preview.get(r.get("pid") or "")
+                try:
+                    if pv is None:
+                        pending += 1
+                    else:
+                        tree.set(str(i), "plan", plan_summary(pv.get("plan")) or pv.get("src", ""))
+                except Exception:
+                    pass
+            _show_plan()
+            if pending:
+                win.after(600, _poll_plans)
+
+        try:
+            if rows:
+                tree.selection_set("0")
+        except Exception:
+            pass
+        win.after(300, _poll_plans)
 
         win.protocol("WM_DELETE_WINDOW", _cancel)
         try:
@@ -2401,23 +3114,35 @@ class AutomationApp:
         AI được gọi trong thread nền (network -> tránh treo Tk). Không bật AI / AI lỗi thì
         tự dùng mẫu offline (generate_topics_from_seed với brain=None vẫn ra đủ N).
         """
-        seed = self._pinned_theme_text()
+        # v1.7.1: MỖI DÒNG ô 'Chủ đề gốc' = 1 chủ đề RIÊNG (v1.7.0 gộp hết thành 1 chuỗi
+        # nên chủ đề nào cũng vác cả cụm "Health, Buy clothes, ..." - đó là bug user báo).
+        # Trống -> auto_seed bên dưới tự chọn chủ đề nền.
+        seeds = [p["google_query"] for p in self._seed_themes() if p.get("google_query")]
+        seed = " / ".join(seeds)
         profiles = [r["id"] for r in self.profile_rows
                     if r["var"].get() and not r["firefox"] and not r.get("hidden", False)]
-        n = len(profiles)
-        if n <= 0:
+        if len(profiles) <= 0:
             messagebox.showinfo(
                 "Chưa chọn profile",
-                "Hãy tick chọn ít nhất 1 tài khoản (đang hiện) để biết cần sinh bao nhiêu chủ đề.",
+                "Hãy tick chọn ít nhất 1 tài khoản (đang hiện) trước khi sinh chủ đề.",
             )
             return
         kw_lang = lang_profiles.norm(self.var_kw_lang.get())
         # v1.6.6: để TRỐNG ô gốc + bấm Sinh = bot TỰ CHỌN 1 chủ đề nền rồi sinh (đúng lời hứa
         # "để trống = bot tự chọn"). Không còn popup bắt điền.
         auto_seed = False
-        if not seed:
-            seed = lang_profiles.random_seed(kw_lang)
+        if not seeds:
+            seeds = [lang_profiles.random_seed(kw_lang)]
+            seed = seeds[0]
             auto_seed = True
+        # v1.7.3: SỐ CHỦ ĐỀ do SỐ DÒNG GỐC quyết định, KHÔNG còn theo số profile.
+        # Cũ: n = len(profiles) -> 4 dòng + 4 profile tick = hạn ngạch 1/dòng, prompt gửi AI
+        # ghi "List exactly 1" nên nút Sinh chỉ chép lại thứ user vừa gõ; tệ hơn, tick 1
+        # profile thì 3 trong 4 dòng bị vứt ÂM THẦM. Sàn len(profiles) giữ tính chất "phiên
+        # này mỗi profile có 1 chủ đề riêng"; phần dư KHÔNG phí vì assign_topics_for_run
+        # xáo lại mỗi lần bấm CHẠY -> xoay vòng sang các phiên/ngày sau.
+        per_seed = self._topics_per_seed()
+        n = max(len(profiles), len(seeds) * per_seed)
         brain_type = (self.var_brain_type.get() or "none").strip()
         # v1.5.9: ô 'AI Brain' đang để 'none' nhưng .env có key -> TỰ chọn 1 brain để sinh
         # (chỉ cho tính năng này). Nhờ vậy user không phải nhớ đổi combobox mới xài được AI.
@@ -2426,7 +3151,11 @@ class AutomationApp:
             auto_pick = _detect_brain_type_from_env() or ""
         self.btn_gen_topics.config(state="disabled", text="Đang sinh...")
 
-        print(f"\n[+] ===== SINH CHỦ ĐỀ: gốc '{seed}' cho {n} profile đang chọn =====")
+        print(f"\n[+] ===== SINH CHỦ ĐỀ: {len(seeds)} dòng gốc × {per_seed} = {n} chủ đề con =====")
+        if n > len(seeds) * per_seed:
+            print(f"    (nâng lên {n} cho đủ {len(profiles)} profile đang tick)")
+        for _i, _s in enumerate(seeds, 1):
+            print(f"      dòng {_i}: {_s}")
         if auto_seed:
             print(f"[*] Ô gốc để trống -> bot tự chọn chủ đề nền '{seed}' để sinh.")
         if brain_type != "none":
@@ -2438,6 +3167,16 @@ class AutomationApp:
             print("    Muốn chủ đề THỰC SỰ khác nhau: chọn Gemini/OpenAI/Qwen ở ô 'AI Brain' hoặc nạp key qua 'QUẢN LÝ API KEY'.")
 
         use_brain_type = brain_type if brain_type != "none" else auto_pick
+        # v1.7.3: không chỉ 1 brain — dựng cả hàng chờ, brain nào chết thì nhảy brain kế.
+        # Auto-pick trả rỗng (không key) -> KHÔNG dò gì, đi thẳng offline như trước.
+        if brain_type != "none":
+            candidates = [brain_type] + [b for b in _brain_candidates_from_env() if b != brain_type]
+        elif auto_pick:
+            candidates = [auto_pick] + [b for b in _brain_candidates_from_env() if b != auto_pick]
+        else:
+            candidates = []
+        if len(candidates) > 1:
+            print(f"[*] Hàng chờ AI: {' -> '.join(candidates)} (chết cái nào nhảy cái kế).")
         print(f"[*] Ngôn ngữ từ khóa: {lang_profiles.LANG_LABELS[kw_lang]}.")
 
         # Worker CHỈ tính toán (AI/offline) rồi đặt kết quả vào holder. MỌI thao tác Tk
@@ -2447,36 +3186,71 @@ class AutomationApp:
         # _poll_generated chờ vô hạn nên nút kẹt "Đang sinh...". Giờ lưu ngữ cảnh để nhánh
         # deadline tự dựng kết quả offline, + token loại kết quả worker về trễ, + cờ one-shot.
         self._gen_seed, self._gen_n, self._gen_lang = seed, n, kw_lang
+        self._gen_seeds = list(seeds)  # v1.7.1: từng DÒNG gốc (nhánh deadline cũng cần)
         self._gen_token = object()
         self._gen_finished = False
-        self._gen_deadline = time.time() + 22  # Gemini timeout 15s < 22s hàng rào an toàn
+        self._gen_logs = []
+        self._gen_log_pos = 0
+        self._gen_progress = (0, 0)
+        # v1.7.1: hàng rào co giãn theo SỐ DÒNG thực sự hỏi AI (mỗi dòng 1 lượt gọi, tối đa
+        # 15s timeout). 1 dòng = 20s như v1.6.8; 4 dòng ≈ 68s; trần 90s để không chờ mãi.
+        _ai_seeds = min(len(seeds), n) if candidates else 1
+        # v1.7.3: cộng thời gian DÒ brain sống (mỗi ứng viên 1 lượt hỏi ngắn; cái chết kiểu
+        # 504 ngốn tới 15s) — không cộng thì hàng rào cắt ngay giữa lúc đang dò.
+        self._gen_deadline = time.time() + min(
+            150, 20 + 16 * max(0, _ai_seeds - 1) + 18 * len(candidates))
         self._gen_result = {"done": False}
         _tok = self._gen_token
+        _logs = self._gen_logs
+        _seeds = list(seeds)
+        _cands = list(candidates)
+        self._gen_ai_note = ""
 
         # Worker KHÔNG in trực tiếp (print từ thread nền -> ThreadSafeStdout -> root.after
         # = thao tác Tk chéo luồng, có thể treo). Thay vào đó gom log vào list, MAIN thread
-        # xả ra khung log trong _after_generate_topics.
+        # xả dần ra khung log trong _poll_generated / _after_generate_topics.
         def _work():
-            logs = []
+            logs = _logs
             brain = None
-            if use_brain_type and use_brain_type != "none":
-                try:
-                    brain = BrainManager.get_brain(use_brain_type)
-                    logs.append(f"[+] Đã khởi tạo AI Brain '{use_brain_type}' OK — bắt đầu hỏi AI.")
-                except Exception as e:
-                    logs.append(f"[!] Không khởi tạo được AI Brain '{use_brain_type}' ({e}) - sinh bằng mẫu offline.")
-                    brain = None
+            if _cands:
+                brain, _bt, _why = _pick_live_brain(_cands, log=logs.append)
+                if brain is None:
+                    # Nêu THẲNG lý do (hết số dư / hết credit / 504) thay vì im lặng rơi về
+                    # offline — trước đây user tưởng app hỏng.
+                    self._gen_ai_note = _why or "không rõ lý do"
+                    logs.append(f"[!] KHÔNG brain AI nào dùng được ({self._gen_ai_note}) — các chủ đề")
+                    logs.append("    dưới đây chỉ là MẪU OFFLINE ghép từ chính chủ đề gốc bạn gõ.")
+                    logs.append("    Muốn chủ đề đa dạng thật: nạp số dư/credit cho key cũ, hoặc thêm")
+                    logs.append("    key khác bằng nút 'QUẢN LÝ API KEY'.")
+
+            def _prog(i, m):
+                self._gen_progress = (i, m)
+
             try:
-                topics = generate_topics_from_seed(seed, n, brain=brain, log=logs.append, lang=kw_lang)
+                topics = generate_topics_for_seeds(_seeds, n, brain=brain, log=logs.append,
+                                                   lang=kw_lang, deadline_ts=self._gen_deadline,
+                                                   progress=_prog)
             except Exception as e:
                 logs.append(f"[!] Lỗi sinh chủ đề ({e}) - dùng mẫu offline.")
-                topics = generate_topics_from_seed(seed, n, brain=None, log=logs.append, lang=kw_lang)
+                topics = generate_topics_for_seeds(_seeds, n, brain=None, log=logs.append,
+                                                   lang=kw_lang)
             # Chỉ commit nếu đây vẫn là run hiện tại (deadline chưa cắt sang offline).
             if getattr(self, "_gen_token", None) is _tok:
                 self._gen_result = {"done": True, "logs": logs, "topics": topics, "seed": seed}
 
         threading.Thread(target=_work, daemon=True).start()
         self.root.after(120, self._poll_generated)
+
+    def _flush_gen_logs(self, logs):
+        """In các dòng log worker vừa ghi thêm (chạy trên MAIN thread). -> số dòng đã in."""
+        start = self._gen_log_pos if logs is getattr(self, "_gen_logs", None) else 0
+        shown = 0
+        for line in list(logs)[start:]:
+            print(line)
+            shown += 1
+        if logs is getattr(self, "_gen_logs", None):
+            self._gen_log_pos = start + shown
+        return shown
 
     def _poll_generated(self):
         """Chạy trên MAIN thread: chờ worker sinh xong rồi mở bảng xem trước.
@@ -2496,21 +3270,31 @@ class AutomationApp:
             # AI quá chậm/treo -> bỏ chờ, tính offline NGAY (nhanh), không đứng hình.
             self._gen_finished = True
             self._gen_token = object()  # vô hiệu hóa kết quả worker về trễ
+            self._flush_gen_logs(getattr(self, "_gen_logs", []))
             logs = ["[!] AI quá chậm/không phản hồi — đã bỏ chờ và dùng mẫu offline để không đứng hình.",
                     "    (Thêm credit OpenAI, nạp key Qwen, hoặc chọn brain khác để có chủ đề đa dạng hơn.)"]
-            topics = generate_topics_from_seed(self._gen_seed, self._gen_n, brain=None,
+            # v1.7.1: offline cũng phải chia theo TỪNG DÒNG gốc (không gộp như v1.7.0).
+            topics = generate_topics_for_seeds(getattr(self, "_gen_seeds", []) or [self._gen_seed],
+                                               self._gen_n, brain=None,
                                                log=logs.append, lang=self._gen_lang)
             self._after_generate_topics(self._gen_seed, topics, logs)
             return
+        # Xả dần log + cho thấy đang làm tới dòng nào (nhiều dòng có thể chờ ~1 phút).
+        self._flush_gen_logs(getattr(self, "_gen_logs", []))
+        try:
+            _i, _m = getattr(self, "_gen_progress", (0, 0))
+            if _m > 1:
+                self.btn_gen_topics.config(text=f"Đang sinh... ({_i}/{_m})")
+        except Exception:
+            pass
         self.root.after(120, self._poll_generated)
 
     def _after_generate_topics(self, seed, topics, logs=None):
         """Chạy trên main thread: xả log worker + bật lại nút + mở bảng xem trước."""
-        # Xả log các bước (gọi AI / AI trả gì / bù offline) ra khung log bên dưới.
-        for line in (logs or []):
-            print(line)
+        # Xả NỐT các bước chưa in (poller đã in dần trong lúc chờ) ra khung log bên dưới.
+        self._flush_gen_logs(logs or [])
         try:
-            self.btn_gen_topics.config(state="normal", text="Sinh chủ đề (theo số profile)")
+            self.btn_gen_topics.config(state="normal", text="Sinh chủ đề con")
         except Exception:
             pass
         if not topics:
@@ -2522,7 +3306,9 @@ class AutomationApp:
         for i, t in enumerate(topics, 1):
             g = (t.get("google_query") or "")
             y = (t.get("youtube_query") or "")
-            print(f"    {i:>2}. Google: {g}" + (f"   | YouTube: {y}" if y and y != g else ""))
+            s = (t.get("seed") or "")
+            line = f"    {i:>2}. [{s}] Google: {g}" if s else f"    {i:>2}. Google: {g}"
+            print(line + (f"   | YouTube: {y}" if y and y != g else ""))
         self._show_generated_topics_preview(seed, topics)
 
     def _show_generated_topics_preview(self, seed, topics):
@@ -2538,28 +3324,34 @@ class AutomationApp:
         except Exception:
             pass
 
-        ttk.Label(
-            win,
-            text=f"Chủ đề gốc: {seed}  →  {len(topics)} chủ đề con (mỗi profile 1 chủ đề, có random):",
-            padding=(12, 10, 12, 6),
-        ).pack(fill="x")
+        # v1.7.1: mỗi chủ đề con mang theo DÒNG GỐC sinh ra nó -> hiện thành cột riêng.
+        _seed_list = [s for s in dict.fromkeys(t.get("seed", "") for t in topics) if s]
+        if len(_seed_list) > 1:
+            _head = (f"{len(_seed_list)} dòng chủ đề gốc  →  {len(topics)} chủ đề con "
+                     f"(mỗi profile 1 chủ đề, có random):")
+        else:
+            _head = f"Chủ đề gốc: {seed}  →  {len(topics)} chủ đề con (mỗi profile 1 chủ đề, có random):"
+        ttk.Label(win, text=_head, padding=(12, 10, 12, 6)).pack(fill="x")
 
         body = ttk.Frame(win, padding=(12, 0, 12, 0))
         body.pack(fill="both", expand=True)
-        cols = ("stt", "google", "yt")
+        cols = ("stt", "seed", "google", "yt")
         tree = ttk.Treeview(body, columns=cols, show="headings", selectmode="browse")
         tree.heading("stt", text="#")
+        tree.heading("seed", text="Từ dòng gốc")
         tree.heading("google", text="Chủ đề (Google)")
         tree.heading("yt", text="Từ khóa (YouTube)")
-        tree.column("stt", width=44, anchor="center")
-        tree.column("google", width=360, anchor="w")
-        tree.column("yt", width=300, anchor="w")
+        tree.column("stt", width=38, anchor="center")
+        tree.column("seed", width=150, anchor="w")
+        tree.column("google", width=330, anchor="w")
+        tree.column("yt", width=260, anchor="w")
         ysb = ttk.Scrollbar(body, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=ysb.set)
         ysb.pack(side="right", fill="y")
         tree.pack(side="left", fill="both", expand=True)
         for i, t in enumerate(topics, 1):
-            tree.insert("", "end", values=(i, (t.get("google_query") or "")[:70],
+            tree.insert("", "end", values=(i, (t.get("seed") or "")[:30],
+                                           (t.get("google_query") or "")[:70],
                                            (t.get("youtube_query") or "")[:60]))
 
         ttk.Label(
@@ -2574,8 +3366,18 @@ class AutomationApp:
         btns.pack(fill="x")
 
         def _apply():
-            g_list = [t.get("google_query", "") for t in topics]
-            y_list = [t.get("youtube_query", "") for t in topics]
+            # v1.7.7: gom theo DÒNG GỐC (khóa "seed") -> mỗi dòng gốc thành 1 CỤM trong danh
+            # sách, ngăn bằng 1 dòng trống; khi chạy mỗi profile dùng trọn 1 cụm.
+            _groups = {}
+            for t in topics:
+                _groups.setdefault(t.get("seed", ""), []).append(t)
+            g_list, y_list = [], []
+            for gi, grp in enumerate(_groups.values()):
+                if gi > 0:
+                    g_list.append("")
+                    y_list.append("")
+                g_list += [t.get("google_query", "") for t in grp]
+                y_list += [t.get("youtube_query", "") for t in grp]
             self._rebuild_kw_rows(g_list, y_list)
             self.var_pinned_theme.set("")  # đã đổ vào danh sách -> không ghim nữa
             try:
@@ -3309,15 +4111,48 @@ clearly tách nhóm hơn kiểu label trần + separator."""
             g = (g_list[i] if i < len(g_list) else "").strip()
             y = (y_list[i] if i < len(y_list) else "").strip()
             if not g and not y:
+                # v1.7.7: cặp rỗng = VẠCH NGĂN CỤM -> 1 dòng trống (gộp trùng, bỏ ở đầu)
+                if lines and lines[-1] != "":
+                    lines.append("")
                 continue
             g = g or y
             lines.append(f"{g} | {y}" if (y and y != g) else g)
+        while lines and lines[-1] == "":
+            lines.pop()
         try:
             self.kw_text.delete("1.0", "end")
             if lines:
                 self.kw_text.insert("1.0", "\n".join(lines))
         except Exception:
             pass
+
+    def _collect_kw_clusters(self):
+        """v1.7.7: danh sách CỤM đọc từ ô Text — các dòng liền nhau = 1 cụm, dòng trống
+        ngăn cụm. Mỗi phần tử = list cặp {"google_query","youtube_query"} (parse như
+        _collect_kw_pairs). Không có dòng trống -> 1 cụm duy nhất chứa mọi dòng."""
+        clusters, cur = [], []
+        try:
+            raw = self.kw_text.get("1.0", "end")
+        except Exception:
+            raw = ""
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                if cur:
+                    clusters.append(cur)
+                    cur = []
+                continue
+            if "|" in line:
+                left, _, right = line.partition("|")
+                g, y = left.strip(), right.strip()
+            else:
+                g, y = line, ""
+            if not g and not y:
+                continue
+            cur.append({"google_query": g or y, "youtube_query": y or g})
+        if cur:
+            clusters.append(cur)
+        return clusters
 
     def _collect_kw_pairs(self):
         """Danh sách chủ đề đọc từ ô Text — mỗi dòng 1 chủ đề (bỏ dòng trống).
@@ -3370,6 +4205,10 @@ clearly tách nhóm hơn kiểu label trần + separator."""
         except (ValueError, TypeError):
             self.spin_daily_min.set(30)
         self.var_pinned_theme.set(str(cfg.get("pinned_theme", "") or ""))
+        try:  # v1.7.3: số chủ đề con sinh cho mỗi dòng gốc
+            self.spin_topics_per_seed.set(max(1, int(cfg.get("topics_per_seed", 5))))
+        except (ValueError, TypeError):
+            self.spin_topics_per_seed.set(5)
 
     def _target_secs(self):
         """Mục tiêu 1 chu trình (giây). v1.4.1: 0 = KHÔNG ghim — bot tự random mỗi vòng
@@ -3387,12 +4226,45 @@ clearly tách nhóm hơn kiểu label trần + separator."""
         except (ValueError, TypeError):
             return 30 * 60
 
-    def _pinned_theme_text(self):
-        """v1.5.3: chủ đề ghim (chuỗi rỗng = bot tự chọn trong danh sách)."""
+    def _topics_per_seed(self):
+        """v1.7.3: mỗi dòng 'Chủ đề gốc' sinh ra bao nhiêu chủ đề con. Nhập rác -> 5."""
         try:
-            return self.var_pinned_theme.get().strip()
+            return max(1, min(20, int(float(self.spin_topics_per_seed.get()))))
+        except (ValueError, TypeError, AttributeError):
+            return 5
+
+    def _pinned_theme_text(self):
+        """v1.7.0: nội dung ô 'Chủ đề gốc' (Text nhiều dòng), đã strip. Rỗng = bot tự chọn
+        trong danh sách. Đọc THẲNG từ Text; var_pinned_theme chỉ là kênh GHI tương thích."""
+        try:
+            return self.ent_pinned_theme.get("1.0", "end-1c").strip()
         except Exception:
-            return ""
+            try:
+                return self.var_pinned_theme.get().strip()
+            except Exception:
+                return ""
+
+    def _seed_themes(self):
+        """v1.7.0: danh sách chủ đề/hạt giống từ ô 'Chủ đề gốc' — mỗi dòng 1 chủ đề (bỏ dòng
+        trống). Tách '|' đầu tiên: trái = Google, phải = YouTube; YouTube trống -> dùng Google."""
+        pairs = []
+        try:
+            raw = self.ent_pinned_theme.get("1.0", "end")
+        except Exception:
+            raw = ""
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if "|" in line:
+                left, _, right = line.partition("|")
+                g, y = left.strip(), right.strip()
+            else:
+                g, y = line, ""
+            if not g and not y:
+                continue
+            pairs.append({"google_query": g or y, "youtube_query": y or g})
+        return pairs
 
     def _keyword_lang(self):
         """v1.6.1: mã ngôn ngữ từ khóa đang chọn (vi/en/ja/ko), chuẩn hoá an toàn."""
@@ -3420,14 +4292,19 @@ clearly tách nhóm hơn kiểu label trần + separator."""
             for r in self.profile_rows
         ]
         g_list, y_list = [], []
-        for p in self._collect_kw_pairs():
-            g = (p.get("google_query") or "").strip()
-            y = (p.get("youtube_query") or "").strip()
-            if not g and not y:
-                continue
-            g_list.append(g)
-            # YouTube trùng Google (dòng không có '|') -> lưu rỗng để giữ schema gọn như cũ
-            y_list.append("" if y == g else y)
+        # v1.7.7: giữa 2 cụm ghi 1 cặp rỗng "" làm vạch ngăn -> mở lại app vẫn đúng nhóm cụm.
+        for ci, cl in enumerate(self._collect_kw_clusters()):
+            if ci > 0:
+                g_list.append("")
+                y_list.append("")
+            for p in cl:
+                g = (p.get("google_query") or "").strip()
+                y = (p.get("youtube_query") or "").strip()
+                if not g and not y:
+                    continue
+                g_list.append(g)
+                # YouTube trùng Google (dòng không có '|') -> lưu rỗng để giữ schema gọn như cũ
+                y_list.append("" if y == g else y)
         cfg["kw_google"] = g_list
         cfg["kw_youtube"] = y_list
         cfg["browser_type"] = self.var_browser_type.get()
@@ -3450,6 +4327,7 @@ clearly tách nhóm hơn kiểu label trần + separator."""
         except (ValueError, TypeError):
             cfg["daily_minutes"] = 30
         cfg["pinned_theme"] = self._pinned_theme_text()  # v1.5.3: nhớ chủ đề ghim
+        cfg["topics_per_seed"] = self._topics_per_seed()  # v1.7.3: số chủ đề con / dòng gốc
         cfg["keyword_lang"] = self._keyword_lang()  # v1.6.1: nhớ ngôn ngữ từ khóa
         try:  # v1.6.7: nhớ vị trí 2 thanh chia (cấu hình | chủ đề | log)
             if self.main_pane.winfo_height() > 200:
@@ -3480,11 +4358,31 @@ clearly tách nhóm hơn kiểu label trần + separator."""
             self.var_api_port.set("54345")
             self.lbl_browser_hint.config(text="(BitBrowser - Port 54345)")
 
+    BUILTIN_BRAINS = ["none", "claude-sonnet", "claude-haiku", "gemini",
+                      "openai", "qwen-max", "qwen-flash", "local"]
+
+    def _brain_values(self):
+        """v1.7.6: brain có sẵn + mọi cổng tự đặt (key có Endpoint + Model)."""
+        return list(self.BUILTIN_BRAINS) + _custom_brain_types()
+
+    def _refresh_brain_values(self):
+        try:
+            self.cbo_brain.config(values=self._brain_values())
+        except Exception:
+            pass
+
     def _on_brain_type_changed(self, event=None):
         """Cập nhật hint khi đổi loại AI Brain."""
         brain_type = self.var_brain_type.get()
+        if brain_type.startswith("custom:"):
+            _n = brain_type[len("custom:"):]
+            self.lbl_brain_hint.config(
+                text=f"(Cổng tự đặt: {api_vault.get_endpoint(_n)} · model {api_vault.get_model(_n) or '?'})")
+            return
         hints = {
             "none": "(Tắt AI - dùng từ khóa thủ công)",
+            "claude-sonnet": "(claude-sonnet-5-5 - cần CLAUDE_API_KEY + Endpoint)",
+            "claude-haiku": "(claude-haiku-5-5 - nhanh/rẻ hơn, cần CLAUDE_API_KEY + Endpoint)",
             "gemini": "(Cần GEMINI_API_KEY - bấm nút QUẢN LÝ API KEY)",
             "openai": "(Cần OPENAI_API_KEY - bấm nút QUẢN LÝ API KEY)",
             "qwen-max": "(Cần QWEN_API_KEY - bấm nút QUẢN LÝ API KEY)",
@@ -4357,21 +5255,23 @@ clearly tách nhóm hơn kiểu label trần + separator."""
             ):
                 return
 
-        # ── v1.5.7 — PHÂN BỔ CHỦ ĐỀ CHO TỪNG PROFILE (trước khi mở thread) ──────────
-        # Người dùng nhập N chủ đề ở card "CHỦ ĐỀ XUYÊN SUỐT" → app chia đều N chủ đề
-        # cho các profile đang chạy (round-robin, mỗi vòng reshuffle — có random thật).
-        # Nếu đang GHIM chủ đề (pinned_theme) thì cả list dùng chung 1 chủ đề đó.
-        pin_now = self._pinned_theme_text()
-        if pin_now:
-            _pinned_topic = {"google_query": pin_now, "youtube_query": pin_now}
-            assignment_map = {pid: dict(_pinned_topic) for pid in profiles}
-            assign_rows = [
-                {"pid": pid, "google": pin_now, "yt": pin_now, "round": i + 1}
-                for i, pid in enumerate(profiles)
-            ]
+        # ── v1.5.7/v1.7.0 — PHÂN BỔ CHỦ ĐỀ CHO TỪNG PROFILE (trước khi mở thread) ──────
+        # v1.7.0: ô 'Chủ đề gốc' nay NHIỀU DÒNG. Có chữ ở đó -> dùng CHÍNH các dòng này làm
+        # danh sách chủ đề (chia round-robin cho các profile): 1 dòng = mọi profile cùng chủ đề
+        # (ghim như cũ), nhiều dòng = mỗi profile 1 dòng. Để trống -> chạy danh sách dưới (kw_text).
+        seed_themes = self._seed_themes()
+        if seed_themes:
+            assignment_map, assign_rows = assign_topics_for_run(profiles, seed_themes)
+            pinned_flag = (len(seed_themes) == 1)
+            pinned_worker = seed_themes[0]["google_query"] if pinned_flag else ""
         else:
-            _themes_now = list(self._collect_kw_pairs())
+            # v1.7.7: mỗi CỤM (khối dòng liền nhau) = 1 theme -> mỗi profile nhận TRỌN 1 cụm.
+            # v1.8.3: MỖI DÒNG = 1 chủ đề riêng (dòng cùng cụm làm gợi ý cho AI) — hết cảnh
+            # 75 dòng liền nhau thành 1 cụm và 8 profile dùng chung 1 bộ.
+            _themes_now = lines_to_themes(self._collect_kw_clusters())
             assignment_map, assign_rows = assign_topics_for_run(profiles, _themes_now)
+            pinned_flag = False
+            pinned_worker = ""
 
         # Lưu vào instance để worker_wrapper đọc (KHÔNG thêm tham số — test_v153
         # vẫn pin đúng chuỗi 'pinned_theme)' là tham số cuối của Thread/submit).
@@ -4382,13 +5282,42 @@ clearly tách nhóm hơn kiểu label trần + separator."""
         self.save_current_config()
 
         # Hộp thoại hiện BẢNG PHÂN BỔ cho người dùng xác nhận trước khi chạy
-        if not self.show_assignment_confirm(assign_rows, pinned=bool(pin_now)):
+        # v1.8.2: đọc proxy ngay bây giờ để hộp xác nhận LUÔN nói rõ lịch chặn trùng proxy;
+        # run_thread_pool dùng lại map này (không gọi API 2 lần).
+        try:
+            _pmap, _why = fetch_proxy_map(browser_type, api_port)
+        except Exception as _e:
+            _pmap, _why = {}, f"lỗi đọc proxy ({_e})"
+        self._proxy_prefetch = (browser_type, _pmap, _why)
+        self._proxy_note = proxy_summary_lines(
+            profiles, _pmap, min(max_workers, len(profiles)), _why,
+            lambda p: (self._profile_name_of(p) or p[:8])[:24])
+        # v1.8.4: sinh TRƯỚC kế hoạch từ khóa của từng profile (thread nền) -> hộp xác nhận
+        # hiện dần; bấm CHẠY thì phiên dùng ĐÚNG kế hoạch đã hiện.
+        self._plan_preview = {}
+        self._plan_brain = None
+        threading.Thread(target=self._prepare_plans,
+                         args=(dict(assignment_map), self.var_brain_type.get(), self._keyword_lang(),
+                               self._plan_preview, PHASE_MAP.get(self.var_phase_label.get(), "clean"),
+                               bool(self.var_skip_youtube.get())),
+                         daemon=True).start()
+        if not self.show_assignment_confirm(assign_rows, pinned=pinned_flag):
             # Người dùng HỦY — chưa bật widget nào, chưa clear STOP_EVENT → về trạng thái ban đầu
             self._assignment_map = {}
             self._last_assignment_rows = []
             self._last_assignment_at = ""
             self._refresh_assignment_tab()
             return
+
+        # v1.8.4: gắn kế hoạch đã xem vào từng profile (bản sao: 2 profile chung chủ đề không dùng chung dict)
+        _ready = 0
+        for _pid, _pv in list((getattr(self, "_plan_preview", None) or {}).items()):
+            if _pid in assignment_map and _pv.get("plan"):
+                assignment_map[_pid] = dict(assignment_map[_pid], plan=list(_pv["plan"]))
+                _ready += 1
+        if _ready:
+            print(f"[System] Dùng kế hoạch đã duyệt cho {_ready}/{len(profiles)} profile "
+                  f"(profile còn lại tự sinh lúc chạy).")
 
         # ── v1.5.7 — hết block phân bổ ─────────────────────────────────────────────
         STOP_EVENT.clear()  # phiên mới: xóa cờ dừng của lần trước
@@ -4404,7 +5333,8 @@ clearly tách nhóm hơn kiểu label trần + separator."""
                     self.btn_refresh_profiles, self.btn_add_manual,
                     self.btn_dashboard, self.btn_export_csv, self.btn_timeline,
                     self.btn_phase_info, self.btn_cycle_time, self.btn_api_keys,
-                    self.btn_stage, self.btn_telegram, self.btn_gen_topics):
+                    self.btn_stage, self.btn_telegram, self.btn_gen_topics,
+                    self.spin_topics_per_seed):
             btn.config(state="disabled")
         # v1.6.3: greyed 2 menu công cụ trên toolbar khi đang chạy
         self.mbtn_report.config(state="disabled")
@@ -4442,11 +5372,15 @@ clearly tách nhóm hơn kiểu label trần + separator."""
         skip_youtube = self.var_skip_youtube.get()
         skip_random_keywords = self.var_skip_random_keywords.get()
         brain_type = self.var_brain_type.get()
+        # v1.8.4: AI đã được dò lúc sinh kế hoạch -> dùng luôn, run_thread_pool khỏi dò lại
+        if getattr(self, "_plan_brain", None):
+            brain_type = self._plan_brain
+            self._brain_resolved = brain_type
         # Map nhãn combobox -> phase string (warmup.py vẫn nhận key clean/mail/youtube như cũ)
         phase = _phase_sel  # v1.5.0: dùng lại giá trị đã tính ở khối cảnh báo lệch giai đoạn
         fixed_target_s = self._target_secs()  # v1.4.1: >0 = mục tiêu cố định; 0 = bot random mỗi vòng
         daily_seconds = self._daily_secs()    # v1.5.3: hạn mức phút/NGÀY cho mỗi acc (0 = tắt)
-        pinned_theme = self._pinned_theme_text()  # v1.5.3: "" = bot tự chọn chủ đề trong danh sách
+        pinned_theme = pinned_worker  # v1.7.0: 1 dòng ô gốc = ghim; nhiều dòng = "" (đã chia qua assignment_map)
         kw_lang = self._keyword_lang()        # v1.6.1: ngôn ngữ từ khóa (vi/en/ja/ko)
         print(f"[System] Ngôn ngữ từ khóa: {lang_profiles.LANG_LABELS[kw_lang]}")
         self.save_current_config()  # Sprint 1.1: nhớ mọi lựa chọn của phiên này
@@ -4458,7 +5392,38 @@ clearly tách nhóm hơn kiểu label trần + separator."""
         slots_queue = queue.Queue()
         for i in range(n_slots):
             slots_queue.put(i)
-        
+
+        # v1.8.3: AI đã chọn mà chết (vd Claude hết số dư) -> tự dùng AI khác còn sống
+        try:
+            if getattr(self, "_brain_resolved", None) == brain_type:
+                self._brain_resolved = None
+                print(f"[System] AI Brain: '{brain_type}' (đã kiểm tra lúc sinh kế hoạch).")
+            else:
+                brain_type = resolve_run_brain(brain_type)
+        except Exception as e:
+            print(f"[!] Không kiểm tra được AI Brain ({e}) - giữ '{brain_type}'.")
+
+        # v1.8.1: CHẶN TRÙNG PROXY + thứ tự ngẫu nhiên xen kẽ theo proxy
+        # v1.8.2: dùng map đã đọc sẵn lúc hiện hộp xác nhận (nếu có) + LUÔN in tóm tắt
+        global _PROXY_MAP
+        pre = getattr(self, "_proxy_prefetch", None)
+        self._proxy_prefetch = None
+        if pre and pre[0] == browser_type:
+            pmap, why_off = pre[1], pre[2]
+        else:
+            pmap, why_off = fetch_proxy_map(browser_type, api_port)
+        with _PROXY_COND:
+            _PROXY_MAP = {pid: pmap.get(pid, "") for pid in profiles}
+            _PROXY_BUSY.clear()
+            _PROXY_WAITING.clear()
+        _PROXY_STATE.update(on=not why_off, why=why_off,
+                            n_proxy=len({proxy_key(v) for v in _PROXY_MAP.values() if proxy_key(v)}))
+        profiles = order_profiles_by_proxy(list(profiles), _PROXY_MAP)
+        _name_of = getattr(self, "_profile_name_of", None)
+        for _ln in proxy_summary_lines(profiles, _PROXY_MAP, n_slots, why_off,
+                                       (lambda p: (_name_of(p) or p[:8])[:24]) if callable(_name_of) else None):
+            print(f"[System] {_ln}")
+
         print(f"[System] Đang chạy với Browser: {browser_type.upper()} | Port API: {api_port or 'default'} | AI Brain: {brain_type} | Chế độ ngâm: {phase}")
         print("[System] Mục tiêu vòng: " + (f"CỐ ĐỊNH {_fmt_dur(fixed_target_s)}/vòng (bạn tự đặt)"
                                             if fixed_target_s else "NGẪU NHIÊN mỗi vòng (bot tự chọn, mỗi profile khác nhau)"))
@@ -4476,7 +5441,9 @@ clearly tách nhóm hơn kiểu label trần + separator."""
             else:
                 print("[System] Chủ đề: bot tự chọn 1 chủ đề trong danh sách cho mỗi profile")
 
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # v1.8.1: mỗi profile 1 luồng nền (luồng chờ proxy chỉ ngủ) — số trình duyệt mở
+        # đồng thời vẫn do slots_queue (n_slots) quyết định.
+        with ThreadPoolExecutor(max_workers=max(1, len(profiles))) as executor:
             futures = [executor.submit(worker_wrapper, self, pid, themes, slots_queue, screen_w, screen_h, skip_youtube, skip_random_keywords, browser_type, api_port, brain_type, phase, fixed_target_s, daily_seconds, pinned_theme, keyword_lang) for pid in profiles]
             # v1.2.9: lỗi thoát khỏi worker từng làm f.result() ném lên đây -> toàn bộ
             # đoạn khôi phục UI bên dưới bị nhảy qua -> GUI kẹt "ĐANG CHẠY" vĩnh viễn.
@@ -4929,7 +5896,8 @@ clearly tách nhóm hơn kiểu label trần + separator."""
             # đi kèm của key cha, hiển thị như một dòng chữ mờ dưới tên key cha.
             ordered = list(api_vault.KNOWN_KEYS)
             ordered += [(k, "") for k, _v in env_pairs
-                        if k not in known_names and not api_vault.is_endpoint_key(k)]
+                        if k not in known_names and not api_vault.is_endpoint_key(k)
+                        and not api_vault.is_companion_key(k, env_map)]
             for name, desc in ordered:
                 val = env_map.get(name, "")
                 endpoint = api_vault.get_endpoint(name)
@@ -4947,6 +5915,10 @@ clearly tách nhóm hơn kiểu label trần + separator."""
                          text=("Cổng: " + endpoint) if endpoint else "Cổng: chính (mặc định)",
                          bg=fr["bg"], fg=(self.C_ACCENT_2 if endpoint else self.C_MUTED),
                          font=("Consolas", 8)).pack(anchor="w")
+                _model = api_vault.get_model(name)
+                if _model:
+                    tk.Label(lbl_fr, text=f"Model: {_model}  ->  AI Brain 'custom:{name}'",
+                             bg=fr["bg"], fg=self.C_ACCENT_2, font=("Consolas", 8)).pack(anchor="w")
                 shown = val if revealed.get(name) else (api_vault.mask(val) if val else "(trống)")
                 val_lbl = tk.Label(fr, text=shown, bg=fr["bg"], fg=self.C_FG,
                                    font=("Consolas", 9), width=26, anchor="e")
@@ -4976,6 +5948,7 @@ clearly tách nhóm hơn kiểu label trần + separator."""
                         return
                     if api_vault.delete_key(name):
                         api_vault.delete_endpoint(name)
+                        api_vault.delete_model(name)
                         print(f"[+] Đã xóa {name} (kèm endpoint nếu có) khỏi .env.")
                         _refresh()
                     else:
@@ -5062,13 +6035,31 @@ clearly tách nhóm hơn kiểu label trần + separator."""
         tk.Label(box, text="VD: https://dashscope.aliyuncs.com/compatible-mode/v1 · trống là về cổng mặc định.",
                  bg=self.C_CARD, fg=self.C_MUTED, font=("Segoe UI", 8, "italic")).pack(anchor="w")
 
+        # v1.7.6: model đi kèm — có Endpoint + Model => key thành AI Brain 'custom:<TEN>'.
+        tk.Label(box, text="Model (chỉ cần với cổng tự đặt, VD: deepseek-v4.1-flash)",
+                 bg=self.C_CARD, fg=self.C_FG, font=("Segoe UI", 9)).pack(anchor="w", pady=(10, 0))
+        md_var = tk.StringVar(value=api_vault.get_model(name) if name else "")
+        md_en = ttk.Entry(box, textvariable=md_var, width=46, font=("Consolas", 10))
+        md_en.pack(fill="x", pady=(2, 0))
+        tk.Label(box, text="Có Endpoint + Model -> chọn được ở ô AI Brain với tên 'custom:<TÊN KEY>'.",
+                 bg=self.C_CARD, fg=self.C_MUTED, font=("Segoe UI", 8, "italic"),
+                 wraplength=340, justify="left").pack(anchor="w")
+
         err = tk.Label(box, text="", bg=self.C_CARD, fg=self.C_ERR_FG, anchor="w",
                        wraplength=340, justify="left")
         err.pack(fill="x", pady=(6, 0))
 
         def _save(_e=None):
-            key_name = name_var.get().strip().upper().replace(" ", "_").replace("-", "_")
+            raw_name = name_var.get().strip()
+            # v1.7.6: '.', '-', ' '... đều thành '_' (trước đây '.' làm tên bị từ chối).
+            key_name = api_vault.sanitize_key_name(raw_name)
             value = val_var.get().strip()
+            model = md_var.get().strip()
+            # Gõ tên model vào ô Tên (vd 'deepseek-v4.1-flash') + có Endpoint mà bỏ trống
+            # ô Model -> hiểu đó chính là model.
+            if (not model and ep_var.get().strip() and raw_name and " " not in raw_name
+                    and any(c in raw_name for c in ".-") and raw_name != raw_name.upper()):
+                model = raw_name
             if not key_name or not api_vault._KEY_RE.match(f"{key_name}="):
                 err.config(text="Tên key không hợp lệ (chữ/số/gạch dưới, không bắt đầu bằng số).")
                 return
@@ -5086,7 +6077,13 @@ clearly tách nhóm hơn kiểu label trần + separator."""
                     print(f"[+] Cổng tự đặt cho {key_name}: {ep}")
                 else:
                     api_vault.delete_endpoint(key_name)
+                if model:
+                    api_vault.set_key(api_vault.model_name(key_name), model)
+                    print(f"[+] Model cho {key_name}: {model} -> AI Brain 'custom:{key_name}'")
+                else:
+                    api_vault.delete_model(key_name)
                 print(f"[+] Đã lưu {key_name} vào .env + os.environ.")
+                self._refresh_brain_values()
                 win.destroy()
                 on_saved()
             else:
@@ -5105,7 +6102,8 @@ clearly tách nhóm hơn kiểu label trần + separator."""
                     self.btn_refresh_profiles, self.btn_add_manual,
                     self.btn_dashboard, self.btn_export_csv, self.btn_timeline,
                     self.btn_phase_info, self.btn_cycle_time, self.btn_api_keys,
-                    self.btn_stage, self.btn_telegram, self.btn_gen_topics):
+                    self.btn_stage, self.btn_telegram, self.btn_gen_topics,
+                    self.spin_topics_per_seed):
             btn.config(state=state)
         # v1.6.3: 2 menu công cụ trên toolbar bật/tắt cùng nhịp (nút ở trên là đối tượng ẩn)
         for mb in (self.mbtn_report, self.mbtn_tools):

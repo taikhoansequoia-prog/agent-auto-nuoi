@@ -258,8 +258,16 @@ while "topics" not in captured and time.time() < _deadline:
     time.sleep(0.02)
 
 check("on_generate_topics -> mở xem trước", "topics" in captured)
-check("N = đúng số profile đang chọn (3 — bỏ firefox + hidden)",
-      len(captured.get("topics", [])) == 3, str(len(captured.get("topics", []))))
+# v1.7.3 VÁ CÓ CHỦ ĐÍCH: assert cũ ("N == số profile") ghim ĐÚNG cái hành vi user báo lỗi
+# — 4 dòng gốc + 4 profile tick = hạn ngạch 1/dòng, prompt ghi "List exactly 1" nên nút Sinh
+# chỉ chép lại thứ vừa gõ (tick 1 profile còn vứt âm thầm 3 dòng). Nay N = số DÒNG GỐC ×
+# ô "Số chủ đề/dòng", sàn = số profile đang tick: 1 dòng × 5 = 5 (sàn 3 không áp).
+_exp157 = max(3, 1 * app._topics_per_seed())
+check("N = số dòng gốc × 'Số chủ đề/dòng' (v1.7.3, sàn = số profile)",
+      len(captured.get("topics", [])) == _exp157,
+      f"{len(captured.get('topics', []))} (chờ {_exp157})")
+check("N KHÔNG còn bị trói vào số profile đang tick",
+      _exp157 != 3 and len(captured.get("topics", [])) != 3)
 check("nút bật lại sau khi sinh xong", not app.btn_gen_topics.instate(["disabled"]))
 app._show_generated_topics_preview = _orig_preview
 ui._detect_brain_type_from_env = _orig_detect
@@ -355,6 +363,9 @@ def _fake_env(mapping):
     return _g
 
 
+# v1.7.6+: cổng tự đặt đọc từ .env THẬT (test này không cô lập .env) -> tắt cho tất định
+_custom_orig = ui._custom_brain_types
+ui._custom_brain_types = lambda: []
 ui.os.getenv = _fake_env({"GEMINI_API_KEY": "x"})
 check("có GEMINI_API_KEY -> auto-pick 'gemini'", ui._detect_brain_type_from_env() == "gemini")
 ui.os.getenv = _fake_env({"OPENAI_API_KEY": "x"})
@@ -364,6 +375,7 @@ check("chỉ có QWEN_API_KEY -> auto-pick 'qwen-max'", ui._detect_brain_type_fr
 ui.os.getenv = _fake_env({})
 check("không key nào -> auto-pick None", ui._detect_brain_type_from_env() is None)
 ui.os.getenv = _env_orig
+ui._custom_brain_types = _custom_orig
 
 # log callback nhận được các bước (offline path)
 _lines = []
@@ -396,9 +408,12 @@ hr("6. v1.6.8 — chống treo 'Sinh chủ đề' (Gemini timeout + hàng rào d
 
 # (a) Gemini ask_text có timeout per-call (fail-fast thay vì treo 80s+).
 _gem = read_src("agent/gemini_brain.py")
-_ask = _gem.split("def ask_text")[1].split("def ", 1)[0]
-check("gemini_brain: ask_text truyền request_options timeout",
-      "request_options" in _ask and "timeout" in _ask)
+# v1.7.1: lệnh gọi SDK chuyển vào _ask_raw (ask_text lo xoay key) -> kiểm CHẶT hơn:
+# MỌI call site generate_content đều phải có request_options timeout.
+_calls = _gem.split("generate_content(")[1:]
+check("gemini_brain: MỌI generate_content đều truyền request_options timeout",
+      bool(_calls) and all("request_options" in c[:400] for c in _calls),
+      f"{len(_calls)} call site")
 check("gemini_brain: có hằng số _GEMINI_TIMEOUT_S (env override)",
       "_GEMINI_TIMEOUT_S" in _gem and "GEMINI_TIMEOUT" in _gem)
 
@@ -406,8 +421,10 @@ check("gemini_brain: có hằng số _GEMINI_TIMEOUT_S (env override)",
 _poll = src.split("def _poll_generated")[1].split("\n    def ", 1)[0]
 check("_poll_generated: dùng _gen_deadline", "_gen_deadline" in _poll)
 check("_poll_generated: cờ one-shot _gen_finished", "_gen_finished" in _poll)
+# v1.7.1: nhánh deadline nay gọi generate_topics_for_seeds (chia theo TỪNG DÒNG gốc),
+# không còn generate_topics_from_seed trên chuỗi gộp.
 check("_poll_generated: nhánh deadline dựng offline (brain=None)",
-      "generate_topics_from_seed" in _poll and "brain=None" in _poll)
+      "generate_topics_for_seeds" in _poll and "brain=None" in _poll)
 check("on_generate_topics: lưu ngữ cảnh cho nhánh deadline",
       "_gen_seed" in src and "_gen_token" in src)
 

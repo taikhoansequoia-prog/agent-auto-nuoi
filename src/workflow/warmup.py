@@ -71,6 +71,17 @@ class WarmupWorkflow:
         # mọi action fallback về session_theme (hành vi cũ, brain=None vẫn chạy y hệt).
         self.plan_steps = []
         self._plan_used = set()
+        # v1.7.7: CỤM TỪ KHÓA đã duyệt (list cặp {"google_query","youtube_query"}), gán từ UI
+        # SAU khi tạo workflow. Có cụm -> mọi action dùng NGUYÊN VĂN lần lượt các từ khóa này,
+        # không nhờ AI sinh kế hoạch/từ khóa mới. Rỗng -> hành vi cũ 100%.
+        self.keyword_cluster = []
+        self._cluster_pos = 0
+        # v1.8.3: từ khóa LIÊN QUAN (cùng dòng gốc) — gợi ý cho AI dựng chuỗi hành động có logic
+        self.related_keywords = []
+        # v1.8.3: bước kế hoạch mà bộ chọn hành động đã chốt cho hành động sắp chạy
+        self._pending_step_idx = None
+        # v1.8.7: báo quốc tế đã đọc trong phiên (không đọc lại cùng báo)
+        self._world_news_seen = set()
         # v1.5.2: trần thời gian THỰC của phiên (giây). 0 = không giới hạn.
         self.session_deadline_s = 0
 
@@ -100,6 +111,44 @@ class WarmupWorkflow:
 
     def random_sleep(self, min_s=2, max_s=5):
         time.sleep(random.uniform(min_s, max_s))
+
+    @staticmethod
+    def _browser_gone(page):
+        """v1.8.9: tab phiên / trình duyệt đã bị đóng (user tắt tay, GPM sập, watchdog giải cứu)?
+        Gặp thật 19/11: profile bị đóng giữa phiên mà phiên vẫn 'nghỉ 2 phút -> hành động kế -> lỗi -> nghỉ…'
+        tới hết giờ, giữ slot + proxy với trình duyệt đã chết. Page giả trong test (không có is_closed) -> False."""
+        try:
+            fn = getattr(page, "is_closed", None)
+            if callable(fn) and fn() is True:
+                return True
+            ctx = getattr(page, "context", None)
+            br = getattr(ctx, "browser", None) if ctx is not None else None
+            conn = getattr(br, "is_connected", None)
+            if callable(conn) and conn() is False:
+                return True
+        except Exception:
+            return False
+        return False
+
+    MIN_ACTION_LEFT_S = 150   # v1.8.9: còn ít hơn mức này thì không mở hành động mới
+    READ_OVERRUN_S = 45       # v1.8.9: lượt đọc được lố trần phiên tối đa chừng này
+
+    def _session_time_up(self):
+        """v1.8.9: đã quá trần thời gian phiên chưa? Trần chỉ được kiểm GIỮA các hành động nên 1 hành động
+        đọc 2-3 bài bắt đầu sát giờ sẽ chạy lố (lô thật 19/11: trần 14 phút, phiên chạy >20 phút).
+        Hành động nhiều bài gọi hàm này trước khi mở BÀI KẾ TIẾP. Chưa đặt mốc (gọi lẻ ngoài phiên) -> False."""
+        end_ts = getattr(self, "_session_end_ts", 0) or 0
+        return bool(end_ts) and time.time() >= end_ts
+
+    def _pump_wait(self, page, seconds):
+        """v1.8.8: chờ mà VẪN cập nhật trạng thái Playwright. Bản sync chỉ xử lý sự kiện khi có lệnh
+        Playwright đang chạy -> trong lúc time.sleep, `page.url` và `context.pages` ĐỨNG YÊN (đo thật
+        19/11: chờ 120s bằng time.sleep không thấy tab mới, đổi sang wait_for_timeout thấy sau 0.4s).
+        Mọi vòng "chờ URL đổi / chờ tab mới" PHẢI dùng hàm này thay cho time.sleep."""
+        try:
+            page.wait_for_timeout(max(1, int(seconds * 1000)))
+        except Exception:
+            time.sleep(seconds)
 
     def _safe_ask_keyword(self, topic_hint="", platform_label="Google"):
         """Hỏi AI sinh từ khóa tìm kiếm tự nhiên. Trả về string hoặc None nếu lỗi.
@@ -149,7 +198,7 @@ class WarmupWorkflow:
     }
     _PLAN_PLATFORMS = ("google", "youtube", "maps", "news", "wikipedia", "tiktok")
 
-    def _safe_ask_plan(self, topic_hint="", max_steps=14):
+    def _safe_ask_plan(self, topic_hint="", max_steps=14, related=None):
         """Hỏi AI sinh KẾ HOẠCH CỤM: 1 chủ đề xuyên suốt -> chuỗi bước nối nhau kiểu
         người thật nghiên cứu (tìm cách làm -> xem hướng dẫn -> tìm đồ liên quan -> tìm
         địa điểm trên Maps...). Trả về list [{"platform", "query"}] hoặc None nếu lỗi.
@@ -164,6 +213,9 @@ class WarmupWorkflow:
             prompt = (
                 "You are a real person researching a topic online for 15-30 minutes.\n"
                 f"The topic of today's session: {topic_hint or 'pick an everyday topic yourself'}.\n"
+                + (f"Related keywords you may weave in (optional): {', '.join(related[:12])}.\n"
+                   if related else "")
+                + 
                 f"Make a plan of {n_min}-{n_max} CHAINED SEARCH steps around that topic, like a real "
                 "person digging deeper. MIX two kinds of steps: (a) real-world actions — where to "
                 "buy gear/shoes/clothes, find shops or places nearby on Google Maps, check today's "
@@ -171,13 +223,20 @@ class WarmupWorkflow:
                 "tutorial videos, read news, read Wikipedia, compare/review, browse TikTok.\n"
                 "Rules:\n"
                 "- Steps MUST be chained & related to the topic (each builds on the previous), not random.\n"
+                "- ORDER MATTERS: list steps in the natural order a person would do them (e.g. google "
+                "to understand -> youtube tutorial -> google/compare gear -> maps a place nearby -> news).\n"
                 "- One line only, format: <platform> | <keyword 3-8 words>\n"
-                "- platform must be one of: google, youtube, maps, news, wikipedia, tiktok.\n"
+                f"- platform must be one of: {', '.join(self._plan_platforms())}.\n"
                 f"- {_LANG.prompt_lang_clause(self.keyword_lang)}\n"
                 "- No numbering, no explanation, no quotes/brackets, no blank lines."
             )
-            result = self.brain.ask_text(prompt)
-            steps = self._parse_plan_text(result)
+            # v1.8.9: kế hoạch 8-14 dòng cần 8-22s (đo thật 19/11, 4 lượt song song) — 10s mặc định làm
+            # phần lớn kế hoạch rơi về bộ dự phòng. Brain không nhận `timeout` (Gemini/local/giả) -> gọi kiểu cũ.
+            try:
+                result = self.brain.ask_text(prompt, timeout=self.PLAN_TIMEOUT_S)
+            except TypeError:
+                result = self.brain.ask_text(prompt)
+            steps = self._plan_fit_platforms(self._parse_plan_text(result))
             if len(steps) >= 4:
                 print(f"  [AI] Kế hoạch cụm ({len(steps)} bước) cho chủ đề "
                       f"'{topic_hint or 'tự chọn'}':")
@@ -222,12 +281,28 @@ class WarmupWorkflow:
             steps.append({"platform": plat, "query": query})
         return steps[:14]
 
+    @staticmethod
+    def _guess_platform(query):
+        """v1.8.3: đoán nền tảng hợp lý cho 1 từ khóa (kế hoạch dự phòng khi không có AI)."""
+        q = (query or "").lower()
+        if any(k in q for k in ("near me", "nearby", "gần", "store", "shop", "park", "cửa hàng", "近く", "근처")):
+            return "maps"
+        if any(k in q for k in ("how to", "tutorial", "workout", "routine", "video", "hướng dẫn", "cách", "やり方", "방법")):
+            return "youtube"
+        if any(k in q for k in ("news", "2026", "latest", "tin tức", "today", "ニュース", "뉴스")):
+            return "news"
+        if any(k in q for k in ("what is", "history", "là gì", "lịch sử")):
+            return "wikipedia"
+        return "google"
+
     def _local_plan_steps(self, topic=""):
         """Bộ bước dự phòng khi KHÔNG có AI Brain (brain=None) — vẫn giữ đúng tinh thần
         'một chủ đề xuyên suốt, đào sâu dần', sinh từ template + RNG per-profile."""
         # v1.6.1: pool bước theo NGÔN NGỮ (vi/en/ja/ko) — trộn hoạt động thực tế
         # (mua đồ/địa điểm/thời tiết/sức khỏe) với học hỏi (how-to/review/wiki).
         base = (topic or _LANG.plan_default_base(self.keyword_lang)).strip().lower()
+        if self._topic_is_specific(base):
+            return self._plan_fit_platforms(self._local_plan_for_specific(base))
         pool = [(plat, tmpl.format(s=base)) for plat, tmpl in _LANG.plan_pool(self.keyword_lang)]
         # Gom theo nền tảng để BẢO ĐẢM mỗi nền tảng có mặt trong chuỗi bước
         # (kế hoạch dự phòng mà thiếu Maps/YouTube thì mất luôn tinh thần v1.5.2).
@@ -249,7 +324,92 @@ class WarmupWorkflow:
         self.rng.shuffle(leftovers)
         picks.extend(mandatory)
         picks.extend(leftovers)
-        return picks[: max(6, min(10, len(picks)))]
+        picks = picks[: max(6, min(10, len(picks)))]
+        # v1.8.3: chèn từ khóa LIÊN QUAN (cùng dòng gốc) ngay sau bước mở màn, nền tảng đoán theo nghĩa
+        rel = [r for r in (self.related_keywords or []) if (r or "").strip()]
+        if rel:
+            extra = [{"platform": self._guess_platform(r), "query": r.strip()} for r in rel[:4]]
+            picks = picks[:1] + extra + picks[1:]
+        return self._plan_fit_platforms(picks)
+
+    # ---- v1.8.9 ----
+    PLAN_TIMEOUT_S = 40
+
+    def _plan_platforms(self):
+        """Nền tảng mà PHIÊN NÀY làm được: bỏ youtube khi tick 'Bỏ qua YouTube' hoặc pha 2 (mail không có
+        YouTube); bỏ tiktok ở pha 3. Trước đây kế hoạch vẫn xếp bước youtube -> bước chết, không bao giờ chạy."""
+        plats = list(self._PLAN_PLATFORMS)
+        if getattr(self, "skip_youtube", False) or self.phase == "mail":
+            plats.remove("youtube")
+        if self.phase == "youtube" and "tiktok" in plats:
+            plats.remove("tiktok")
+        return plats
+
+    def _plan_fit_platforms(self, steps):
+        """Bước thuộc nền tảng phiên này không làm được -> chuyển thành tìm Google (giữ nguyên từ khóa)."""
+        ok = set(self._plan_platforms())
+        out, seen = [], set()
+        for s in steps or []:
+            plat = s.get("platform") if s.get("platform") in ok else "google"
+            key = (plat, (s.get("query") or "").strip().lower())
+            if not key[1] or key in seen:
+                continue
+            seen.add(key)
+            out.append({"platform": plat, "query": s.get("query").strip()})
+        return out
+
+    @staticmethod
+    def _topic_is_specific(base):
+        """Chủ đề đã là cả câu tìm kiếm (>=4 từ; tiếng Nhật/Hàn không dấu cách: >=10 ký tự)?"""
+        b = (base or "").strip()
+        return len(b.split()) >= 4 or (" " not in b and len(b) >= 10 and not b.isascii())
+
+    def _local_plan_for_specific(self, base):
+        """Kế hoạch dự phòng cho chủ đề là CẢ CÂU: dùng nguyên văn chủ đề + các từ khóa liên quan trên nhiều
+        nền tảng, không nhét vào mẫu ghép."""
+        rel = []
+        for r in (self.related_keywords or []):
+            r = (r or "").strip()
+            if r and r.lower() != base and r.lower() not in [x.lower() for x in rel]:
+                rel.append(r)
+        steps = [{"platform": "google", "query": base}]
+        tail = [{"platform": self._guess_platform(r), "query": r} for r in rel[:8]]
+        same = [{"platform": p, "query": base} for p in ("youtube", "news", "wikipedia", "tiktok")]
+        if self._guess_platform(base) == "maps":
+            same.append({"platform": "maps", "query": base})
+        same += [{"platform": "google", "query": f"{base} {suf}"} for suf in _LANG.plan_safe_suffix(self.keyword_lang)]
+        self.rng.shuffle(same)
+        # xen kẽ: từ khóa liên quan (đào sâu) và cùng chủ đề trên nền tảng khác
+        while tail or same:
+            if tail:
+                steps.append(tail.pop(0))
+            if same:
+                steps.append(same.pop(0))
+        return steps[:12]
+
+    # v1.8.3: nền tảng của bước kế hoạch -> các hành động thực hiện được bước đó (ưu tiên trái)
+    PLAN_FOLLOW_P = 0.8
+    PLATFORM_ACTIONS = {
+        # v1.8.8: thêm "action_read_news" (tên khóa đọc báo ở pha YouTube) — trước đây pha 3 không
+        # theo được bước google/news nào của kế hoạch.
+        "google": ("search_google", "read_news", "action_read_news"),
+        "news": ("read_news", "action_read_news", "search_google"),
+        "youtube": ("action_search_youtube",),   # watch_video (trang chủ) không gõ từ khóa
+        "maps": ("action_search_maps",),
+        "wikipedia": ("action_read_wikipedia",),
+        "tiktok": ("action_watch_tiktok",),
+    }
+
+    def _pick_plan_action(self, valid_actions):
+        """Bước CHƯA dùng sớm nhất của kế hoạch mà pha hiện tại làm được -> (tên hành động, idx).
+        Bước nào nền tảng không có trong pha (vd YouTube khi tick bỏ qua) thì bỏ qua."""
+        for idx, st in enumerate(self.plan_steps or []):
+            if idx in self._plan_used:
+                continue
+            for name in self.PLATFORM_ACTIONS.get(st.get("platform"), ()):
+                if name in valid_actions:
+                    return name, idx
+        return None
 
     def _next_plan_step(self, platform):
         """Lấy bước kế tiếp của kế hoạch KHỚP với nền tảng của action đang chạy.
@@ -274,9 +434,111 @@ class WarmupWorkflow:
                 return q
         return None
 
+    def _next_cluster_keyword(self, platform, theme_key="google_query"):
+        """v1.7.7: từ khóa kế tiếp của CỤM đã duyệt (vòng tròn; hết cụm thì quay lại đầu).
+        Action YouTube lấy youtube_query, còn lại google_query. Ghi DB để phiên sau
+        ưu tiên từ khóa chưa dùng. Không có cụm -> None (caller giữ hành vi cũ)."""
+        cluster = [c for c in (self.keyword_cluster or [])
+                   if (c.get("google_query") or c.get("youtube_query") or "").strip()]
+        if not cluster:
+            return None
+        idx = self._cluster_pos % len(cluster)
+        self._cluster_pos += 1
+        pair = cluster[idx]
+        g = (pair.get("google_query") or "").strip()
+        y = (pair.get("youtube_query") or "").strip()
+        q = (y or g) if theme_key == "youtube_query" else (g or y)
+        lap = " (vòng lại)" if self._cluster_pos > len(cluster) else ""
+        print(f"      + [Cụm] Từ khóa {idx + 1}/{len(cluster)} [{platform}] '{q}'{lap}")
+        if self.db is not None and self.profile_id:
+            try:
+                self.db.log_keyword_used(self.profile_id, g or q)
+            except Exception:
+                pass
+        return q
+
+    # v1.7.8: "tìm lại cho rõ" — dùng thêm từ khóa của CỤM ngay trong 1 hành động tìm kiếm,
+    # GIÃN NHỊP như người thật (đọc kết quả rồi mới gõ lại). KHÔNG rút ngắn nghỉ giữa hành
+    # động, KHÔNG thêm điều hướng mới (gõ lại vào chính ô tìm kiếm đang mở).
+    REFINE_P = (0.6, 0.35)          # xác suất tìm lại lần 1, lần 2 trong cùng hành động
+    REFINE_MIN_LEFT_S = 180         # còn ít hơn 3 phút trần phiên -> không tìm lại nữa
+
+    def _cluster_remaining(self):
+        """Số từ khóa CỤM chưa dùng trong phiên này (không tính vòng lại)."""
+        n = len([c for c in (self.keyword_cluster or [])
+                 if (c.get("google_query") or c.get("youtube_query") or "").strip()])
+        return max(0, n - self._cluster_pos)
+
+    def _refine_search(self, page, box_selector, platform, theme_key="google_query"):
+        """Sau khi lướt kết quả, có xác suất gõ tìm lại 1-2 từ khóa kế tiếp của cụm vào
+        CHÍNH ô tìm kiếm đang mở. Mỗi lần: nghỉ đọc 15-40s -> xoá ô -> gõ như người -> Enter
+        -> lướt kết quả 20-45s. Trả về số lần đã tìm lại. Mọi lỗi -> dừng êm, action chạy tiếp."""
+        done = 0
+        if not self.keyword_cluster:
+            return 0
+        for p in self.REFINE_P:
+            if self.stop_requested or self._cluster_remaining() <= 0:
+                break
+            end_ts = getattr(self, "_session_end_ts", 0) or 0
+            if end_ts and end_ts - time.time() < self.REFINE_MIN_LEFT_S:
+                break
+            if random.random() >= p:
+                break
+            try:
+                print("      + Đọc kỹ kết quả, chưa ưng — sẽ tìm lại bằng từ khóa khác trong cụm...")
+                self.random_sleep(15, 40)
+                if self.stop_requested:
+                    break
+                box = page.locator(box_selector).first
+                box.wait_for(state="visible", timeout=8000)
+                kw = self._next_cluster_keyword(platform, theme_key)
+                if not kw:
+                    break
+                box.click()
+                self.random_sleep(0.4, 1.0)
+                page.keyboard.press("Control+A")
+                self.random_sleep(0.2, 0.6)
+                page.keyboard.press("Backspace")
+                self.random_sleep(0.5, 1.4)
+                self.human_type(box, kw)
+                self.random_sleep(0.8, 1.8)
+                page.keyboard.press("Enter")
+                try:
+                    page.wait_for_load_state("domcontentloaded", timeout=30000)
+                except Exception:
+                    pass
+                done += 1
+                print(f"      + [Cụm] Tìm lại lần {done}: '{kw}' — lướt kết quả mới...")
+                browse_end = time.time() + random.uniform(20, 45)
+                while time.time() < browse_end and not self.stop_requested:
+                    self._human_scroll(page, random.randint(180, 520))
+                    self.random_sleep(2.5, 6)
+                if random.random() < 0.5:
+                    self._human_scroll(page, -random.randint(300, 700))
+                    self.random_sleep(1.5, 3.5)
+            except Exception as e:
+                print(f"      + Không tìm lại được ({str(e)[:80]}) — dùng kết quả hiện tại.")
+                break
+        return done
+
     def _plan_keyword(self, platform, theme_key="google_query", default=""):
         """Từ khóa cho một action: ưu tiên bước kế tiếp của kế hoạch cụm (v1.5.2),
         không có thì dùng session_theme (cặp từ khóa cũ) rồi đến default."""
+        # v1.8.3: bộ chọn hành động đã chốt đúng bước kế hoạch -> dùng chính bước đó
+        idx = self._pending_step_idx
+        if idx is not None:
+            self._pending_step_idx = None
+            if 0 <= idx < len(self.plan_steps or []) and idx not in self._plan_used:
+                self._plan_used.add(idx)
+                q = (self.plan_steps[idx].get("query") or "").strip()
+                if q:
+                    left = len(self.plan_steps) - len(self._plan_used)
+                    print(f"      + [Kế hoạch] Bước {idx + 1}/{len(self.plan_steps)} "
+                          f"[{self.plan_steps[idx].get('platform')}] '{q}' (còn {left} bước).")
+                    return q
+        q = self._next_cluster_keyword(platform, theme_key)
+        if q:
+            return q
         q = self._next_plan_step(platform)
         if q:
             return q
@@ -343,6 +605,34 @@ class WarmupWorkflow:
         except Exception as e:
             print(f"      + Bỏ qua click kết quả tìm kiếm do lỗi: {e}")
 
+    # v1.8.6: người thật hay GÕ THẲNG địa chỉ trang quen (cnn.com, tiktok.com) chứ không phải lúc
+    # nào cũng qua Google -> ~30% lượt vào báo/TikTok gõ thẳng. Lượt đang đi theo 1 BƯỚC KẾ HOẠCH
+    # (có từ khóa riêng) thì vẫn qua Google để dùng đúng từ khóa đó.
+    DIRECT_VISIT_P = 0.3
+
+    def _want_direct_visit(self):
+        return self._pending_step_idx is None and self.rng.random() < self.DIRECT_VISIT_P
+
+    def _direct_visit(self, page, url, label):
+        """Gõ thẳng địa chỉ trên thanh địa chỉ -> True nếu tải được trang."""
+        print(f"      + [Gõ thẳng] Mở {label} bằng thanh địa chỉ (người quen trang — lần này không qua Google).")
+        self.random_sleep(1.5, 4)   # nhịp gõ địa chỉ
+        for attempt in range(2):
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                return True
+            except Exception as e:
+                if attempt == 0 and "interrupted" in str(e).lower():
+                    try:
+                        page.evaluate("window.stop()")
+                    except Exception:
+                        pass
+                    self.random_sleep(2, 4)
+                    continue
+                print(f"      [!] Không mở được {label} bằng địa chỉ: {e}")
+                return False
+        return False
+
     def action_read_news(self, page):
         """Hành động 2: LÊN GOOGLE tìm chủ đề -> bấm vào 1 trang báo -> đọc (không goto thẳng).
         v1.4.1: trước đây goto thẳng trang báo; nay đi qua cổng Google như TikTok/Wikipedia —
@@ -354,8 +644,10 @@ class WarmupWorkflow:
         target_site, target_domain = random.choice(sites)
         
         try:
-            # Cổng vào tự nhiên: gõ "chủ đề + tên báo" trên Google rồi bấm kết quả
-            landed = self._navigate_via_google(page, self._plan_keyword("news", "google_query", self._dkw("news")), target_domain)
+            # v1.8.6: ~30% gõ thẳng địa chỉ báo quen; còn lại gõ "chủ đề + tên báo" trên Google
+            landed = self._want_direct_visit() and self._direct_visit(page, target_site, target_domain)
+            if not landed:
+                landed = self._navigate_via_google(page, self._plan_keyword("news", "google_query", self._dkw("news")), target_domain)
             if not landed:
                 print("      + [Google] Không đáp đúng trang báo qua cổng Google — (Fallback Google) vào thẳng.")
                 page.goto(target_site, wait_until="domcontentloaded", timeout=45000)
@@ -366,6 +658,9 @@ class WarmupWorkflow:
             
             num_clicks = random.randint(1, 2)
             for i in range(num_clicks):
+                if i and self._session_time_up():
+                    print("      + Đã hết giờ của phiên — không mở thêm bài mới.")
+                    break
                 print(f"      + Đang tìm và click bài báo thứ {i+1}...")
                 try:
                     # Bắt tất cả các thẻ a có chứa liên kết
@@ -452,6 +747,295 @@ class WarmupWorkflow:
                     
         except Exception as e:
             print(f"      + Lỗi mạng khi vào trang báo, bỏ qua hành động này. Lỗi: {e}")
+
+    # v1.8.5: đọc báo quốc tế CNN / BBC / Fox News — chọn NGẪU NHIÊN 1 trang, vào qua cổng
+    # Google, lướt trang chủ rồi bấm ĐÚNG 1 bài. Mẫu link bài lấy từ DOM thật (diag 19/11/2026):
+    #   CNN  /YYYY/MM/DD/<mục>/<slug>   (".../<mục>/video/..." là video -> loại)
+    #   BBC  /news/articles/c<id> (+ /sport/<môn>/articles/, /travel/articles/...; videos/live -> loại)
+    #   Fox  /<mục>/<slug-có-gạch>      (/video/<số>, /category/, /live-news/, /deals/ -> loại)
+    WORLD_NEWS_SITES = (
+        ("CNN", "https://edition.cnn.com/", "cnn.com",
+         r"cnn\.com/\d{4}/\d{2}/\d{2}/[a-z-]+/[a-z0-9-]{12,}(?:/index\.html)?/?(?:[?#].*)?$"),
+        ("BBC", "https://www.bbc.com/news", "bbc.com",
+         r"bbc\.(?:com|co\.uk)/(?:[a-z-]+/){1,2}articles/c[a-z0-9]{8,}/?(?:[?#].*)?$"),
+        ("Fox News", "https://www.foxnews.com/", "foxnews.com",
+         r"foxnews\.com/(?:us|world|politics|entertainment|health|media|economy|travel|science|"
+         r"lifestyle|sports|outkick-sports|tech|opinion|food-drink|auto|faith-values)/"
+         r"[a-z0-9]+(?:-[a-z0-9]+){3,}/?(?:[?#].*)?$"),
+    )
+    WORLD_NEWS_QUERIES = ("latest news", "top stories", "breaking news", "news today", "world news",
+                          "us news", "politics news", "business news", "tech news", "health news",
+                          "science news", "travel news", "live updates", "headlines today")
+    WORLD_NEWS_TOPIC_P = 0.35   # v1.8.6: lượt dùng CHỦ ĐỀ của profile (chỉ khi từ khóa tiếng Anh)
+
+    def _world_news_query(self):
+        """v1.8.6: từ khóa tìm báo quốc tế — đa dạng, không để nhiều profile gõ y hệt nhau.
+        Tiếng Anh: ~35% dùng chủ đề/từ khóa liên quan của chính profile; còn lại 1 trong 14 cụm tin tức."""
+        if self.keyword_lang == "en" and self.rng.random() < self.WORLD_NEWS_TOPIC_P:
+            pool = [(self.session_theme or {}).get("google_query", "")] + list(self.related_keywords or [])[:6]
+            pool = [q.strip() for q in pool if q and q.strip() and len(q) <= 70]
+            if pool:
+                return self.rng.choice(pool)
+        return self.rng.choice(self.WORLD_NEWS_QUERIES)
+
+    _PICK_ARTICLE_JS = r"""
+    ([pattern, host]) => {
+      const re = new RegExp(pattern, 'i'); const vh = window.innerHeight;
+      document.querySelectorAll('a[data-gpm-pick]').forEach(a => a.removeAttribute('data-gpm-pick'));
+      const near = [], far = [], seen = new Set();
+      for (const a of document.querySelectorAll('a[href]')) {
+        let u; try { u = new URL(a.href); } catch (e) { continue; }
+        if (!u.hostname.endsWith(host) || !re.test(u.hostname + u.pathname + u.search)) continue;
+        const r = a.getBoundingClientRect();
+        if (r.width < 40 || r.height < 12) continue;
+        const key = u.pathname; if (seen.has(key)) continue; seen.add(key);
+        // tránh vùng đáy màn hình (Fox có dải "BREAKING NEWS" đè lên ~1/4 dưới)
+        const inView = r.top > 40 && r.top < vh * 0.7;
+        // ưu tiên link là TIÊU ĐỀ (chữ dài), không phải nhãn ngắn kiểu "Analysis"/"Video"
+        const txt = (a.innerText || '').trim();
+        // chữ ghi nguồn ảnh ("Finn Gomez/Getty Images", "AP Photo") không phải tiêu đề
+        const headline = txt.length >= 20 && !/getty|images|\bap photo|reuters|afp|shutterstock/i.test(txt);
+        (inView ? near : far).push([a, headline, Math.abs(r.top - vh / 3)]);
+      }
+      far.sort((x, y) => x[2] - y[2]); far.splice(10);   // ngoài khung nhìn: chỉ 10 bài GẦN nhất
+      const pick = (arr) => { const h = arr.filter(x => x[1]); return (h.length ? h : arr).map(x => x[0]); };
+      const pool = near.length ? pick(near) : pick(far);
+      if (!pool.length) return null;
+      const a = pool[Math.floor(Math.random() * pool.length)];
+      a.setAttribute('data-gpm-pick', '1');
+      return {href: a.href, text: (a.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 90),
+              target: a.target || '', near: near.length, total: seen.size};
+    }
+    """
+
+    # v1.8.6: điểm giữa tiêu đề có bị phần tử khác đè không (dải BREAKING NEWS của Fox, banner quảng cáo,
+    # hộp cookie...). Bị đè -> tìm nút đóng của lớp phủ và đánh dấu data-gpm-close.
+    _COVER_CHECK_JS = r"""
+    () => {
+      const a = document.querySelector("a[data-gpm-pick='1']"); if (!a) return {state: 'gone'};
+      const r = a.getBoundingClientRect(); const x = r.left + r.width / 2, y = r.top + Math.min(r.height / 2, 20);
+      if (y < 0 || y > innerHeight) return {state: 'offscreen'};
+      const top = document.elementFromPoint(x, y);
+      if (!top || top === a || a.contains(top) || top.contains(a)) return {state: 'clear'};
+      document.querySelectorAll('[data-gpm-close]').forEach(e => e.removeAttribute('data-gpm-close'));
+      // v1.8.8: chỉ tìm nút × BÊN TRONG chính lớp phủ (tổ tiên fixed/sticky gần nhất), đang trong màn hình
+      // — không leo lên cả trang rồi bấm nhầm 1 nút "close" không liên quan.
+      let box = top, layer = null, close = null;
+      for (let i = 0; box && box !== document.body && i < 12; i++, box = box.parentElement) {
+        const pos = getComputedStyle(box).position;
+        if (pos === 'fixed' || pos === 'sticky') { layer = box; break; }
+      }
+      if (layer) {
+        for (const b of layer.querySelectorAll('button, [role=button], a, span, div, svg')) {
+          const lbl = ((b.getAttribute('aria-label') || '') + ' ' + (b.getAttribute('title') || '') + ' ' +
+                       String(b.className && b.className.baseVal !== undefined ? b.className.baseVal : b.className)).toLowerCase();
+          const txt = (b.innerText || '').trim();
+          const q = b.getBoundingClientRect();
+          if (q.width < 8 || q.height < 8 || q.width > 80 || q.height > 80) continue;
+          if (q.top < 0 || q.left < 0 || q.bottom > innerHeight || q.right > innerWidth) continue;
+          if (/close|dismiss|đóng/.test(lbl) || txt === '×' || txt === '✕' || txt.toLowerCase() === 'close') { close = b; break; }
+        }
+      }
+      if (close) close.setAttribute('data-gpm-close', '1');
+      return {state: 'covered', by: (top.className || top.tagName || '').toString().slice(0, 60), close: !!close};
+    }
+    """
+
+    def _clear_cover(self, page, link, name):
+        """Trước khi bấm: tiêu đề bị che thì bấm nút × của lớp phủ, không có nút thì cuộn cho tiêu đề lên cao."""
+        for _ in range(2):
+            try:
+                st = page.evaluate(self._COVER_CHECK_JS)
+            except Exception:
+                return
+            if (st or {}).get("state") != "covered":
+                return
+            if st.get("close"):
+                print(f"      + Tiêu đề đang bị lớp phủ che ({st.get('by')}) — bấm × để tắt trước.")
+                try:
+                    self.human_click(page, page.locator("[data-gpm-close='1']").first)
+                except Exception:
+                    pass
+                self.random_sleep(1, 2.5)
+            else:
+                print(f"      + Tiêu đề đang bị che ({st.get('by')}) — cuộn cho bài lên cao hơn rồi mới bấm.")
+                self.smooth_scroll(page, random.randint(150, 260))
+                self.random_sleep(1, 2)
+                try:
+                    link.scroll_into_view_if_needed(timeout=3000)
+                except Exception:
+                    pass
+
+    def _wait_article_open(self, page, before, tabs_before, timeout=12, domain=""):
+        """Chờ bài mở -> trang đang đọc (cùng tab khi URL đổi, hoặc TAB MỚI bật ra), None nếu không.
+        v1.8.8: chờ bằng _pump_wait (time.sleep làm page.url/context.pages đứng yên -> bản v1.8.6 "mù",
+        tưởng bấm trượt). Đo thật 19/11 sau khi sửa: Fox chuyển trang/bật tab trong <1s; link in hoa
+        giữa bài của Fox có target=_blank. Tab mới KHÔNG thuộc `domain` (quảng cáo bật lên) -> đóng, chờ tiếp."""
+        t_end = time.time() + timeout
+        while time.time() < t_end:
+            try:
+                if page.url != before:
+                    return page
+                for p in list(self.context.pages):
+                    if p is page or p in tabs_before:
+                        continue
+                    try:
+                        p.wait_for_load_state("domcontentloaded", timeout=15000)
+                    except Exception:
+                        pass
+                    if not domain or domain in (p.url or ""):
+                        return p
+                    print(f"      + Tab lạ bật lên ({(p.url or '')[:60]}) — đóng lại như người thật tắt quảng cáo.")
+                    try:
+                        p.close()
+                    except Exception:
+                        tabs_before.append(p)
+            except Exception:
+                pass
+            self._pump_wait(page, 0.4)
+        return None
+
+    def _pick_world_article(self, page, pattern, host):
+        """Đánh dấu 1 link BÀI BÁO thật (khớp mẫu của site) bằng data-gpm-pick -> info hoặc None."""
+        try:
+            return page.evaluate(self._PICK_ARTICLE_JS, [pattern, host])
+        except Exception as e:
+            print(f"      [-] Không quét được link bài báo: {e}")
+            return None
+
+    # v1.8.7: KHÔNG phải phiên nào cũng đọc báo, và không đọc dồn. Đầu mỗi phiên bốc ngẫu nhiên số lượt
+    # ĐỌC BÁO (báo thường + báo quốc tế gộp chung) được phép: 0 / 1 / 2 lượt.
+    NEWS_ACTION_KEYS = ("read_news", "action_read_news", "read_world_news")
+    NEWS_CAP_WEIGHTS = ((0, 0.35), (1, 0.50), (2, 0.15))
+
+    def _roll_news_cap(self):
+        caps, weights = zip(*self.NEWS_CAP_WEIGHTS)
+        return self.rng.choices(caps, weights=weights, k=1)[0]
+
+    def action_read_world_news(self, page):
+        """v1.8.5: CNN / BBC / Fox News ngẫu nhiên -> qua cổng Google -> lướt trang chủ -> bấm 1 bài -> đọc."""
+        seen = getattr(self, "_world_news_seen", set())
+        sites = [x for x in self.WORLD_NEWS_SITES if x[0] not in seen] or list(self.WORLD_NEWS_SITES)
+        name, home_url, domain, pattern = random.choice(sites)
+        seen.add(name)
+        self._world_news_seen = seen
+        print(f"  -> [Action] Đọc báo quốc tế: {name} (ngẫu nhiên CNN/BBC/Fox)...")
+        try:
+            landed = self._want_direct_visit() and self._direct_visit(page, home_url, domain)
+            if not landed:
+                landed = self._navigate_via_google(page, self._world_news_query(), domain)
+            if not landed:
+                print(f"      + [Google] Không đáp đúng {name} qua cổng Google — (Fallback Google) vào thẳng.")
+                page.goto(home_url, wait_until="domcontentloaded", timeout=45000)
+            self.restore_mouse_position(page)
+            self.random_sleep(2, 4)
+            try:
+                self._close_popups(page)
+            except Exception:
+                pass
+
+            # Lướt trang chủ ngắm tin nổi bật trước khi chọn bài (nhịp chậm như đọc báo thường)
+            self._simulate_scroll_and_read(page, 40, 90)
+
+            info = None
+            for attempt in range(3):
+                info = self._pick_world_article(page, pattern, domain)
+                if info:
+                    break
+                print("      [-] Chưa thấy bài báo trong khung nhìn — lướt thêm để tìm...")
+                self._human_scroll(page, random.randint(500, 900))
+                self.random_sleep(2, 4)
+            # v1.8.8: so ĐÚNG địa chỉ trang chủ (bản cũ so "chứa chuỗi" nên edition.cnn.com/cnn-underscored/...
+            # bị coi là đang ở trang chủ -> không quay về, bỏ lượt đọc)
+            if not info and (page.url or "").split("?")[0].split("#")[0].rstrip("/") != home_url.rstrip("/"):
+                # Google đôi khi đáp vào trang con không có bài (vd BBC podcast) -> về trang chủ báo
+                # (đang ở chính site đó rồi, giống bấm logo — không phải bỏ cổng Google)
+                print(f"      + Trang đang đọc của {name} không có bài báo — về trang chủ {name} để chọn bài.")
+                try:
+                    page.goto(home_url, wait_until="domcontentloaded", timeout=45000)
+                    self.random_sleep(3, 6)
+                    self._close_popups(page)
+                except Exception:
+                    pass
+                self._simulate_scroll_and_read(page, 20, 45)
+                info = self._pick_world_article(page, pattern, domain)
+            if not info:
+                print(f"      [!] {name}: không tìm được link bài báo nào — chỉ đọc lướt trang chủ.")
+                return
+
+            print(f"      + Chọn 1 bài trong {info.get('total')} bài trên trang ({info.get('near')} bài đang trong khung nhìn): "
+                  f"'{info.get('text') or info.get('href')}'")
+            link = page.locator("a[data-gpm-pick='1']").first
+            self._smooth_scroll_to_element(page, link)
+            self.random_sleep(1, 2.5)
+            try:
+                self.human_hover(page, link)
+            except Exception:
+                pass
+            self.random_sleep(1, 3)  # đọc tiêu đề trước khi bấm
+
+            before = page.url
+            tabs_before = list(self.context.pages)
+            self._clear_cover(page, link, name)
+            # Bấm: rê chuột Bezier tới tiêu đề rồi phát động bằng Locator.click() (tự cuộn vào khung nhìn,
+            # bấm đúng giữa tiêu đề). v1.8.8 ĐÍNH CHÍNH: ghi chú cũ "human_click không mở được bài trên
+            # CNN/Fox" là SAI — do vòng chờ time.sleep mù; đo lại có bơm sự kiện: human_click mở 5/6,
+            # Locator.click mở 4/4 -> giữ Locator.click vì ổn định hơn.
+            try:
+                self.move_mouse_bezier(page, link)
+            except Exception:
+                pass
+            self.random_sleep(0.1, 0.3)
+            try:
+                link.click(timeout=8000)   # chờ trang bài tải hay timeout -> theo dõi bên dưới
+            except Exception:
+                pass
+            active = self._wait_article_open(page, before, tabs_before, domain=domain)
+            if active is None:
+                print("      + Cú bấm chưa mở bài — xem có gì che, tắt đi rồi bấm lại.")
+                try:
+                    self._close_popups(page)
+                except Exception:
+                    pass
+                self._clear_cover(page, link, name)
+                try:
+                    self.move_mouse_bezier(page, link)
+                    link.click(timeout=8000)   # KHÔNG force: không bấm xuyên lớp phủ
+                except Exception:
+                    pass
+                active = self._wait_article_open(page, before, tabs_before, domain=domain)
+            if active is None:
+                print(f"      [!] {name}: không mở được bài — bỏ qua phần đọc bài.")
+                return
+            if active is not page:
+                print("      + Bài mở sang TAB MỚI — chuyển sang tab đó để đọc.")
+                try:
+                    active.bring_to_front()
+                    self.enable_virtual_cursor(active)
+                except Exception:
+                    pass
+            else:
+                try:
+                    page.wait_for_load_state("domcontentloaded", timeout=30000)
+                except Exception:
+                    pass
+            self.restore_mouse_position(active)
+            print(f"      + Đã mở bài {name}: {active.url[:110]}")
+            self._simulate_scroll_and_read(active, 150, 330)  # 2.5-5.5 phút như đọc báo v1.6.4
+            if active is not page:
+                print("      + Đọc xong, đóng tab bài báo.")
+            # v1.8.8: đóng MỌI tab phát sinh trong lượt này (bài mở tab mới, bấm 2 lần...) -> không để tab mồ côi
+            try:
+                for _p in list(self.context.pages):
+                    if _p is not page and _p not in tabs_before:
+                        _p.close()
+                if active is not page:
+                    page.bring_to_front()
+                    self.restore_mouse_position(page)
+            except Exception:
+                pass
+        except Exception as e:
+            print(f"      + Lỗi khi đọc báo {name}, bỏ qua hành động này. Lỗi: {e}")
 
     def action_watch_video(self, page):
         """Hành động 3: Xem video từ trang chủ. Nếu trang chủ trống/mới, tự động chuyển sang tìm kiếm theo từ khóa."""
@@ -627,18 +1211,30 @@ class WarmupWorkflow:
             # 1. Bấm sang tab Tin tức (News) của Google
             print("      + Đang tìm và bấm sang tab Tin tức (News)...")
             news_tab = active_page.locator("a:has-text('Tin tức'), a:has-text('News'), div[role='tab']:has-text('Tin tức'), div[role='tab']:has-text('News')").first
+            on_news_tab = False   # v1.9.0: đã bấm sang tab Tin tức chưa (để biết đường quay lại tab Tất cả)
             if news_tab.is_visible():
                 self.human_click(active_page, news_tab)
                 active_page.wait_for_load_state("domcontentloaded")
                 self.random_sleep(3, 6)
-            
+                on_news_tab = True
+            else:
+                # v1.8.9 (gặp thật 19/11): từ khóa kiểu "... near me" Google KHÔNG hiện tab Tin tức
+                print("      + Google không hiện tab Tin tức cho từ khóa này — đọc kết quả tìm kiếm thường.")
+
+            # v1.7.8: thỉnh thoảng gõ lại từ khóa kế trong cụm vào ô Google (vẫn ở tab Tin tức)
+            self._refine_search(active_page, "textarea[name='q'], input[name='q']", "news", "google_query")
+
             # --- VÒNG LẶP ĐỌC BÁO (1 ĐẾN 3 BÀI) ---
             num_articles_to_read = random.randint(1, 3)
             print(f"      + Kế hoạch: Sẽ lướt và đọc {num_articles_to_read} bài báo trong phiên này.")
             
             read_urls = set() # Bộ nhớ lưu các link đã đọc để không bấm trùng
+            read_count = 0    # v1.8.9: số bài ĐỌC THẬT (log cũ báo "đã xử lý 3 bài" dù không đọc bài nào)
             
             for article_index in range(num_articles_to_read):
+                if article_index and self._session_time_up():
+                    print("      + Đã hết giờ của phiên — không mở thêm bài mới.")
+                    break
                 print(f"\n      + [Google News] Đang tìm và xử lý bài báo thứ {article_index + 1}/{num_articles_to_read}...")
                 
                 # 2. Cuộn nhẹ để tìm bài báo (hoặc tải thêm bài mới nếu đã đọc các bài trên cùng)
@@ -647,7 +1243,23 @@ class WarmupWorkflow:
                     self.random_sleep(2, 4)
                     
                 # Quét các liên kết bài báo
-                all_article_links = active_page.locator("a[jsname='YKoRaf'], a.WlydOe, a h3").all()
+                all_article_links = active_page.locator("a[jsname='YKoRaf'], a.WlydOe").all()
+                if not all_article_links:
+                    # v1.8.9: không ở tab Tin tức (hoặc Google đổi giao diện) -> đọc kết quả thường của trang
+                    all_article_links = active_page.locator("#rso a:has(h3), #search a:has(h3)").all()
+                if not all_article_links and on_news_tab:
+                    # v1.9.0 (lô thật 19/11, warmup 17): tab Tin tức mở ra KHÔNG có bài nào cho từ khóa
+                    # (cùng từ khóa, phiên khác lại có 10 bài) -> bot lướt trang trống rồi bỏ đi, đọc 0 bài.
+                    # Người thật thấy trống thì quay lại tab Tất cả và đọc kết quả thường.
+                    print("      + Tab Tin tức không có bài nào cho từ khóa này — quay lại tab Tất cả, đọc kết quả thường.")
+                    on_news_tab = False
+                    try:
+                        active_page.go_back(wait_until="commit", timeout=15000)
+                        active_page.wait_for_load_state("domcontentloaded", timeout=10000)
+                    except Exception:
+                        pass
+                    self.random_sleep(2, 4)
+                    all_article_links = active_page.locator("#rso a:has(h3), #search a:has(h3)").all()
                 valid_links = []
                 
                 for link in all_article_links:
@@ -670,6 +1282,7 @@ class WarmupWorkflow:
                     self.random_sleep(1, 2)
                     
                     print("      + Đã chốt mục tiêu bài báo. Đang click...")
+                    serp_url = active_page.url   # v1.8.9: để quay lại đúng trang kết quả sau khi đọc
                     
                     # 3. Xử lý logic Click mở báo (Cùng tab hoặc Tab mới)
                     try:
@@ -708,6 +1321,7 @@ class WarmupWorkflow:
                         self.random_sleep(12, 26)  # v1.6.4: giãn nhịp đọc (8-16s -> 12-26s)
                         
                     print(f"      + Đã đọc xong bài {article_index + 1}.")
+                    read_count += 1
                     
                     # 5. Dọn dẹp để chuẩn bị cho vòng lặp tiếp theo
                     if active_page != page:
@@ -723,19 +1337,33 @@ class WarmupWorkflow:
                             # Đợi thêm một chút để trang định hình, nếu lỗi thì bỏ qua
                             active_page.wait_for_load_state("domcontentloaded", timeout=10000)
                         except Exception as back_err:
-                            print(f"      [!] Trang Google kẹt khi Back, đang ép tải lại (Reload)...")
-                            try:
-                                active_page.reload(timeout=15000)
-                            except:
-                                pass
+                            # v1.8.9: Back thường ĐÃ về trang kết quả, chỉ là chờ tải quá hạn -> không tải lại
+                            # vô cớ (bản cũ lần nào cũng báo "kẹt" rồi Reload).
+                            # v1.9.0 (lô thật, warmup 2): chưa về Google thì KHÔNG tải lại trang báo nữa (thừa 1 lượt
+                            # tải) — khối ngay dưới mở lại đúng trang kết quả.
+                            _on_serp = "google." in (active_page.url or "")
+                            if not _on_serp:
+                                print("      [!] Back quá hạn chờ và chưa về Google.")
                     
+                    # v1.8.9 (đo thật): có trang báo đẩy Back về TRANG CHỦ của báo chứ không về Google
+                    # -> bài kế không tìm thấy. Không ở Google thì mở lại đúng trang kết quả.
+                    try:
+                        if "google." not in (active_page.url or ""):
+                            print("      + Back chưa về trang kết quả (trang báo tự chuyển hướng) — mở lại trang kết quả Google.")
+                            active_page.goto(serp_url, wait_until="domcontentloaded", timeout=30000)
+                    except Exception:
+                        pass
                     self.random_sleep(3, 5)
                     self.restore_mouse_position(active_page)
                         
                 else:
                     print("      [-] Không tìm thấy bài báo nào mới trên màn hình, sẽ cuộn tiếp ở nhịp sau.")
                     
-            print(f"  -> [Action] HOÀN TẤT ĐỌC BÁO! (Đã xử lý {num_articles_to_read} bài).")
+            if read_count == 0:
+                # v1.8.9: không bấm được bài nào thì cũng không "tìm xong bỏ đi sau vài giây" — lướt đọc trang kết quả
+                print("      [!] Không mở được bài nào — lướt đọc trang kết quả một lúc rồi mới rời đi.")
+                self._simulate_scroll_and_read(active_page, 25, 60)
+            print(f"  -> [Action] HOÀN TẤT ĐỌC BÁO! (Đã đọc {read_count}/{num_articles_to_read} bài).")
                 
         except Exception as e:
             print(f"      + Lỗi trong quá trình tìm và đọc báo: {e}")
@@ -940,16 +1568,10 @@ class WarmupWorkflow:
             
             print(f"      + Bảng gõ chữ đã mở. Đang gõ phím trực tiếp từ bàn phím: '{query}'...")
             
-            # GÕ PHÍM TOÀN CỤC (Không cần truyền locator)
-            for char in query:
-                if char == " ":
-                    page.keyboard.press("Space")
-                else:
-                    page.keyboard.type(char)
-                
-                # Độ trễ ngẫu nhiên giống người thật đang gõ
-                time.sleep(random.uniform(0.08, 0.25))
-            
+            # GÕ PHÍM TOÀN CỤC (ô đã tự focus) — v1.8.0: đi qua human_type (WPM + lỗi
+            # chính tả gõ-rồi-sửa như mọi ô tìm kiếm khác; mã < 8 ký tự nên không để sót lỗi)
+            self.human_type_keys(page, query)
+
             self.random_sleep(1, 2)
             
             # Nhấn Enter để xem biểu đồ chi tiết
@@ -1045,7 +1667,10 @@ class WarmupWorkflow:
                 if random.random() < 0.5:
                     self.smooth_scroll(page, -random.randint(400, 800))
                     self.random_sleep(2, 4)
-                    
+
+                # v1.7.8: thỉnh thoảng tìm lại bằng từ khóa kế trong cụm rồi mới chọn video
+                self._refine_search(page, "input[name='search_query']", "youtube", "youtube_query")
+
                 # Đếm và lấy các video từ danh sách kết quả tìm kiếm
                 videos = page.locator("ytd-video-renderer a#video-title").all()
                 if videos:
@@ -1072,6 +1697,58 @@ class WarmupWorkflow:
                     
             except Exception as e:
                 print(f"      + Lỗi quá trình tìm kiếm YouTube. Lỗi: {e}")
+
+    # v1.7.9: xác suất 1 lần gõ để SÓT 1 lỗi chính tả không sửa
+    TYPO_LEAVE_P = 0.10
+
+    def _type_slip(self, page, text, i, kind, base_delay, rng):
+        """v1.7.9: gõ 1 lỗi chính tả KHÔNG sửa tại vị trí i. Trả về số ký tự của text đã 'tiêu'.
+        neighbor = bấm nhầm phím cạnh · swap = đảo 2 chữ · drop = sót chữ · double = lặp chữ."""
+        char = text[i]
+        nxt = text[i + 1] if i + 1 < len(text) else ""
+        if kind == "swap" and not (nxt.isascii() and nxt.isalpha()):
+            kind = "double"
+        if kind == "neighbor":
+            nb = self._get_keyboard_neighbors(char)
+            if not nb:
+                kind = "double"
+        consumed = 1
+        if kind == "neighbor":
+            w = rng.choice(nb)
+            page.keyboard.type(w.upper() if char.isupper() else w)
+        elif kind == "swap":
+            page.keyboard.type(nxt)
+            time.sleep(base_delay * rng.uniform(0.5, 1.0))
+            page.keyboard.type(char)
+            consumed = 2
+        elif kind == "drop":
+            pass
+        else:  # double
+            page.keyboard.type(char)
+            time.sleep(base_delay * rng.uniform(0.3, 0.6))
+            page.keyboard.type(char)
+        time.sleep(base_delay * rng.uniform(0.6, 1.2))
+        print(f"      + Gõ vội, để sót 1 lỗi chính tả ({kind}) — không sửa, Enter luôn.")
+        return consumed
+
+    class _FocusedKeyboard:
+        """v1.8.0: 'ô' giả cho chỗ gõ phím toàn cục (ô đã tự focus, không có locator) —
+        cho phép dùng chung human_type (WPM, lỗi chính tả, đảo chữ...)."""
+
+        def __init__(self, page):
+            self.page = page
+
+        def click(self, **_k):
+            pass
+
+        def press_sequentially(self, text, delay=100):
+            for ch in text:
+                self.page.keyboard.type(ch)
+                time.sleep(delay / 1000.0)
+
+    def human_type_keys(self, page, text):
+        """v1.8.0: gõ kiểu người vào ô ĐANG focus sẵn (vd bảng tìm mã Google Finance)."""
+        self.human_type(self._FocusedKeyboard(page), text)
 
     def human_type(self, locator, text):
         """Gõ phím mô phỏng người thật.
@@ -1104,15 +1781,51 @@ class WarmupWorkflow:
             # --- Typo chance tuyến tính theo WPM ---
             # 40 WPM → ~0.5%, 85 WPM → ~3.2%
             typo_chance = 0.005 + (wpm - 40) * 0.0006
+            # v1.7.9: mức "cẩu thả" khác nhau mỗi lần gõ (có lúc cẩn thận, có lúc gõ ẩu)
+            typo_chance *= rng.uniform(0.6, 1.8)
+
+            # v1.7.9: thỉnh thoảng ĐỂ SÓT 1 lỗi chính tả không sửa rồi Enter luôn (người gõ vội;
+            # Google/YouTube tự gợi ý "Có phải bạn muốn tìm"). Chỉ chữ ASCII, text >= 8 ký tự.
+            slip_at, slip_kind = -1, None
+            if len(text) >= 8 and rng.random() < self.TYPO_LEAVE_P:
+                cands = [k for k in range(1, len(text) - 1)
+                         if text[k].isascii() and text[k].isalpha()
+                         and text[k - 1].isascii() and text[k - 1].isalpha()]
+                if cands:
+                    slip_at = rng.choice(cands)
+                    slip_kind = rng.choice(["neighbor", "swap", "drop", "double"])
 
             i = 0
             while i < len(text):
                 char = text[i]
 
+                if i == slip_at:
+                    i += self._type_slip(page, text, i, slip_kind, base_delay, rng)
+                    continue
+
                 # ==========================================
                 # XỬ LÝ TYPO + BACKSPACE CỤM
                 # ==========================================
                 if rng.random() < typo_chance and char.isalpha():
+                    # v1.7.9: ~25% lỗi kiểu ĐẢO 2 chữ ("teh") -> nhận ra, xoá 2, gõ lại
+                    nxt = text[i + 1] if i + 1 < len(text) else ""
+                    if (char.isascii() and nxt.isascii() and nxt.isalpha()
+                            and rng.random() < 0.25):
+                        page.keyboard.type(nxt)
+                        time.sleep(base_delay * rng.uniform(0.5, 1.0))
+                        page.keyboard.type(char)
+                        time.sleep(base_delay * rng.uniform(0.5, 1.0))
+                        self.random_sleep(0.2, 0.6)
+                        for _ in range(2):
+                            page.keyboard.press("Backspace")
+                            time.sleep(rng.uniform(0.06, 0.15))
+                        self.random_sleep(0.15, 0.45)
+                        page.keyboard.type(char)
+                        time.sleep(base_delay * rng.uniform(0.7, 1.3))
+                        page.keyboard.type(nxt)
+                        time.sleep(base_delay * rng.uniform(0.7, 1.3))
+                        i += 2
+                        continue
                     neighbors = self._get_keyboard_neighbors(char)
                     if neighbors:
                         wrong_char = rng.choice(neighbors)
@@ -1662,7 +2375,7 @@ class WarmupWorkflow:
         except Exception:
             return "en"
 
-    def _navigate_via_google(self, page, keyword, target_domain):
+    def _navigate_via_google(self, page, keyword, target_domain, must_any=None):
         """Cổng vào TỰ NHIÊN cho mọi site đích: lên Google -> human_type từ khóa ->
         cuộn lướt đọc kết quả (hành vi người thật) -> bấm kết quả thuộc target_domain.
         KHÔNG bao giờ goto thẳng link đích. Trả về True nếu cuối cùng đáp đúng site."""
@@ -1729,6 +2442,12 @@ class WarmupWorkflow:
                     except Exception:
                         text = ""
                     if target_domain in href or target_domain in text:
+                        # v1.9.0: must_any = các chuỗi mà kết quả PHẢI chứa ít nhất 1 (không phân biệt hoa thường).
+                        # Dùng cho Maps: chữ "maps" khớp cả Apple Maps, gymmaps.app… (đo thật 19/11).
+                        if must_any:
+                            blob = (href + " " + text).lower()
+                            if not any(m in blob for m in must_any):
+                                continue
                         candidates.append(a)
                 except Exception:
                     continue
@@ -1791,7 +2510,7 @@ class WarmupWorkflow:
                     pass
                 if landed:
                     break
-                self.random_sleep(0.4, 0.9)
+                self._pump_wait(page, random.uniform(0.4, 0.9))   # v1.8.8: time.sleep làm page.url đứng yên
 
             if landed:
                 self.random_sleep(1, 2)
@@ -1852,15 +2571,92 @@ class WarmupWorkflow:
         except Exception:
             pass
 
+    # ------------------------------------------------------------------
+    # v1.8.0: CHUYỂN VIDEO TIKTOK KHÔNG GIẬT
+    # Đo thật 19/11/2026 (Profile warmup 19, feed /foryou 1920x945): khung cuộn
+    # #column-list-container có scroll-snap BẮT BUỘC, mỗi video cao 945px. Lăn 18-30 nấc
+    # nhỏ (_human_scroll) -> sau MỖI nấc feed hút về ô cũ -> video nảy 37-59 lần, 0/5 lần
+    # sang được video mới = cái "GIẬT". Bấm nút có sẵn của TikTok "Đi đến video tiếp theo"
+    # (data-e2e=feed-navigation-next): 6/6 lần sang đúng 1 video, 0 lần nảy, ~0.22s.
+    # Ngoài ra khách chưa đăng nhập bị chặn bởi 2 hộp: "Đăng nhập vào TikTok"
+    # (modal-close-inner-button) và "Bạn muốn xem gì trên TikTok?" (tux-modal, nút ×
+    # = *CloseButtonWrapper; phím Escape KHÔNG đóng được) -> phải đóng giữa phiên.
+    # ------------------------------------------------------------------
+    TIKTOK_NEXT_SEL = '[data-e2e="feed-navigation-next"]'
+    TIKTOK_PREV_SEL = '[data-e2e="feed-navigation-prev"]'
+    TIKTOK_OVERLAY_CLOSE_SELS = (
+        '[data-e2e="modal-close-inner-button"]',
+        '[class*="tux-modal__container--open"] [class*="CloseButtonWrapper"]',
+        'div[role="dialog"] [aria-label="Close"]',
+    )
+
+    def _tiktok_scroll_top(self, page):
+        """scrollTop của khung feed (None nếu không tìm thấy khung)."""
+        try:
+            return page.evaluate(
+                "() => { const s = document.querySelector('#column-list-container');"
+                " return s ? s.scrollTop : null; }")
+        except Exception:
+            return None
+
+    def _tiktok_dismiss_overlays(self, page):
+        """Đóng hộp đăng nhập / chọn sở thích nếu đang che feed. Trả về số hộp đã đóng."""
+        closed = 0
+        for sel in self.TIKTOK_OVERLAY_CLOSE_SELS:
+            try:
+                btn = page.locator(sel).first
+                if btn.count() and btn.is_visible(timeout=400):
+                    self.random_sleep(1.0, 2.5)  # người thật: thấy hộp, đọc lướt rồi mới bấm ×
+                    btn.click(timeout=2000)
+                    closed += 1
+                    self.random_sleep(0.6, 1.4)
+            except Exception:
+                continue
+        if closed:
+            print(f"      + Đóng {closed} hộp TikTok che màn hình (đăng nhập / chọn sở thích).")
+        return closed
+
+    def _tiktok_go(self, page, direction="next"):
+        """Bấm nút ↓/↑ của TikTok (rê chuột Bezier như người) rồi XÁC NHẬN feed đã sang video.
+        Chưa sang -> đóng hộp che (nếu vừa bật) rồi thử lại đúng 1 lần. Trả True/False."""
+        sel = self.TIKTOK_NEXT_SEL if direction == "next" else self.TIKTOK_PREV_SEL
+        for attempt in range(2):
+            self._tiktok_dismiss_overlays(page)
+            before = self._tiktok_scroll_top(page)
+            try:
+                btn = page.locator(sel).first
+                if not (btn.count() and btn.is_visible(timeout=800)):
+                    if direction == "next" and attempt == 0:
+                        # Bố cục cũ không có nút: dùng phím mũi tên (cần focus feed).
+                        page.keyboard.press("ArrowDown")
+                    else:
+                        return False
+                else:
+                    self.human_click(page, btn)
+            except Exception as e:
+                print(f"      + Không bấm được nút chuyển video ({str(e)[:60]}).")
+            if before is None:
+                self.random_sleep(1.0, 1.6)
+                return True  # không đo được khung feed -> tin là đã sang
+            t_end = time.time() + 3
+            while time.time() < t_end:
+                time.sleep(0.25)
+                now = self._tiktok_scroll_top(page)
+                if now is not None and abs(now - before) > 200:
+                    return True
+        return False
+
     def action_watch_tiktok(self, page):
         """Kịch bản TikTok (Bản Thuần Xem): Lướt feed video KHÔNG cần login, KHÔNG like/comment.
         Chỉ mô phỏng hành vi xem và cuộn để tạo tín hiệu fingerprint."""
         print("  -> [Action] Bắt đầu phiên TikTok: Tìm qua Google + lướt video (chế độ xem, không tương tác)...")
         try:
-            keyword = self._plan_keyword("tiktok", "google_query", self._dkw("tiktok")).strip()
-
-            # --- CỔNG VÀO TỰ NHIÊN: Google -> gõ từ khóa -> cuộn -> bấm kết quả TikTok ---
-            landed = self._navigate_via_google(page, keyword, "tiktok.com")
+            # v1.8.6: ~30% gõ thẳng tiktok.com (người quen app); còn lại qua Google như cũ
+            landed = self._want_direct_visit() and self._direct_visit(page, "https://www.tiktok.com/foryou", "tiktok.com")
+            if not landed:
+                keyword = self._plan_keyword("tiktok", "google_query", self._dkw("tiktok")).strip()
+                # --- CỔNG VÀO TỰ NHIÊN: Google -> gõ từ khóa -> cuộn -> bấm kết quả TikTok ---
+                landed = self._navigate_via_google(page, keyword, "tiktok.com")
             if not landed:
                 # Fallback: chỉ khi Google lỗi/không có kết quả mới vào thẳng feed
                 print("      + (Fallback Google) Vào feed For You trực tiếp...")
@@ -1966,6 +2762,8 @@ class WarmupWorkflow:
 
             for v_index in range(num_videos):
                 print(f"\n      + [TikTok] Đang xem video thứ {v_index + 1}/{num_videos}...")
+                # v1.8.0: hộp đăng nhập / chọn sở thích có thể bật ra giữa chừng -> đóng trước khi xem
+                self._tiktok_dismiss_overlays(page)
 
                 # 1. Ngồi xem video một khoảng thời lượng NGẪU NHIÊN kiểu người.
                 #    v1.5.1: bản cũ `uniform(12, 35)` là phân phối ĐỀU nên mọi video
@@ -2027,19 +2825,22 @@ class WarmupWorkflow:
                                     pass
                         except Exception:
                             self.move_mouse_viewport_center(page)
-                    if random.random() < 0.4:
-                        print("      + Quẹt nhẹ xem trước video kế rồi kéo về...")
-                        # v1.5.1: đổi sang _human_scroll (cùng nhịpEase với cú chuyển
-                        # video). Chiều giữ nguyên như cũ: xuống 0.4-0.7 viewport rồi
-                        # kéo NGƯỢC lại 100-300px = đúng nghĩa "xem trước rồi kéo về".
-                        self._human_scroll(page, int(vh * random.uniform(0.4, 0.7)))
-                        self.random_sleep(1, 2)
-                        self._human_scroll(page, -random.randint(100, 300))
-                        self.random_sleep(0.8, 1.5)
-                    print("      + Cuộn sang video tiếp theo...")
-                    # v1.5.1: CẢ viewport mà smooth_scroll vê xong trong 0.2-1.2s là
-                    # nguyên nhân chính TikTok snap "cập" cái GIẬT -> _human_scroll
-                    self._human_scroll(page, vh + random.randint(50, 200))
+                    # v1.8.0: BỎ "quẹt nhẹ nửa màn hình rồi kéo về" — trên feed scroll-snap nó
+                    # làm video nảy lên xuống (đo được 39-59 lần/lượt). Thay bằng hành vi
+                    # người thật không đánh nhau với feed: thỉnh thoảng QUAY LẠI video trước
+                    # xem lại vài giây rồi mới đi tiếp.
+                    if v_index > 0 and random.random() < 0.10:
+                        print("      + Quay lại video trước xem lại một chút...")
+                        if self._tiktok_go(page, "prev"):
+                            self.random_sleep(3, 8)
+                            self._tiktok_go(page, "next")
+                            self.random_sleep(1.5, 3)
+                    print("      + Bấm sang video tiếp theo...")
+                    # v1.8.0: bấm nút "Đi đến video tiếp theo" của TikTok thay cho lăn
+                    # 18-30 nấc (_human_scroll) — xem chú thích ở _tiktok_go.
+                    if not self._tiktok_go(page, "next"):
+                        print("      [!] Không chuyển được sang video kế (feed bị chặn) - kết thúc TikTok.")
+                        break
                     self.random_sleep(2, 4)
 
             print(f"  -> [Action] HOÀN TẤT PHIÊN TIKTOK! (Đã xem xong {num_videos} video).")
@@ -2107,6 +2908,57 @@ class WarmupWorkflow:
         except Exception as e:
             print(f"      + Lỗi khi đọc Wikipedia: {e}")
 
+    MAPS_SERP_SELS = "a[href^='/maps/place/'], a[href*='google.com/maps/place/'], a[href*='/maps/search/']"
+    # v1.9.0: dấu hiệu 1 kết quả tìm kiếm là của Google Maps (breadcrumb/href thật 19/11: "Google Maps |
+    # https://maps.google.com › …", "Google Maps | goo.gl | https://maps.app.goo.gl › …")
+    MAPS_RESULT_MARKS = ("google maps", "maps.google", "google.com/maps", "maps.app.goo.gl")
+
+    def _serp_open_maps(self, page):
+        """v1.8.9: đang ở trang kết quả Google có khung bản đồ địa điểm -> bấm link địa điểm để sang Google Maps.
+        Selector lấy từ DOM thật 19/11 (ảnh bản đồ nhỏ = a[href^='/maps/place/'], cùng tab, ô tìm của Maps
+        có sẵn tên địa điểm). True nếu đã ở Maps."""
+        try:
+            cur = (page.url or "").lower()
+            if "google." not in cur or "/search" not in cur:
+                return False
+            cands = []
+            for el in page.locator(self.MAPS_SERP_SELS).all()[:12]:
+                box = self._safe_bbox(el, timeout=800)
+                if box and box["width"] > 30 and box["height"] > 15:
+                    href = ""
+                    try:
+                        href = el.get_attribute("href", timeout=800) or ""
+                    except Exception:
+                        pass
+                    cands.append((0 if "/maps/place/" in href else 1, len(cands), el, href))
+            if not cands:
+                return False
+            cands.sort(key=lambda c: c[:2])   # ưu tiên link ĐỊA ĐIỂM (/maps/place/) rồi mới tới /maps/search/
+            target, href = cands[0][2], cands[0][3]
+            print(f"      + [Google] Trang kết quả có khung bản đồ địa điểm — bấm vào để sang Google Maps ({href[:60]}).")
+            self._smooth_scroll_to_element(page, target)
+            self.random_sleep(0.8, 2.0)
+            try:
+                self.move_mouse_bezier(page, target)
+            except Exception:
+                pass
+            self.random_sleep(0.3, 0.9)
+            try:
+                target.click(timeout=8000)
+            except Exception:
+                pass   # click chờ trang tải -> hay timeout; vòng chờ URL bên dưới quyết định
+            t_end = time.time() + 12
+            while time.time() < t_end:
+                cur = (page.url or "").lower()
+                if "google.com/maps" in cur or "maps.google" in cur:
+                    self.random_sleep(2, 4)
+                    print("      + [Google] Đã sang Google Maps từ trang kết quả (tự nhiên, không vào thẳng).")
+                    return True
+                self._pump_wait(page, 0.5)
+        except Exception as e:
+            print(f"      + [Google] Không bấm được khung bản đồ ({str(e)[:70]}).")
+        return False
+
     def action_search_maps(self, page):
         """Kịch bản Google Maps (v1.5.2): tìm ĐỊA ĐIỂM liên quan tới chủ đề xuyên suốt
         ("công viên chạy gần đây", "cửa hàng đồ chạy bộ"...) — kiểu người thật:
@@ -2135,13 +2987,27 @@ class WarmupWorkflow:
             # target_domain="maps" (không phải "google.com/maps") vì href Google trả
             # về "/goto?url=..." và breadcrumb hiển thị "maps.google" -> chuỗi "maps"
             # khớp cả breadcrumb lẫn URL sau khi đáp.
-            self._navigate_via_google(page, keyword, "maps")
+            # v1.9.0 (lô thật 19/11, warmup 1): chữ "maps" khớp cả kết quả KHÔNG phải Google Maps (Apple Maps,
+            # gymmaps.app — đo thật) -> bot đáp nhầm trang, cổng báo "đã đáp" rồi lại phải vào thẳng. Chỉ nhận
+            # kết quả của Google Maps; trang 1 không có thì ở lại trang kết quả để bấm khung bản đồ địa điểm.
+            landed = self._navigate_via_google(page, keyword, "maps", must_any=self.MAPS_RESULT_MARKS)
             on_maps = False
-            try:
-                cur = (page.url or "").lower()
-                on_maps = ("google.com/maps" in cur) or ("maps.google" in cur)
-            except Exception:
-                pass
+            t_end = time.time() + (8 if landed else 0)   # link rút gọn maps.app.goo.gl cần 1-2 nhịp chuyển hướng
+            while True:
+                try:
+                    cur = (page.url or "").lower()
+                    on_maps = ("google.com/maps" in cur) or ("maps.google" in cur)
+                except Exception:
+                    pass
+                if on_maps or time.time() >= t_end:
+                    break
+                self._pump_wait(page, 0.5)
+            # v1.8.9 (lô thật 19/11: 4/4 lượt không đáp Maps): trang kết quả có KHUNG BẢN ĐỒ địa điểm
+            # -> bấm vào đó như người thật, trước khi phải vào thẳng.
+            via_serp = False
+            if not on_maps and self._serp_open_maps(page):
+                on_maps = via_serp = True
+            on_place = via_serp and "/maps/place/" in (page.url or "")
             if not on_maps:
                 # (Fallback Google) ghi nhãn rõ ràng như các action khác
                 print("      + [Google] Không đáp Google Maps qua cổng Google — (Fallback Google) vào thẳng.")
@@ -2152,28 +3018,47 @@ class WarmupWorkflow:
                     print(f"      + Lỗi vào Maps (bỏ qua action): {goto_err}")
                     return
 
-            self._close_popups(page)
+            # v1.8.9: ở trang ĐỊA ĐIỂM thì KHÔNG gọi _close_popups — nó bấm [aria-label='Đóng'] là nút đóng
+            # của chính bảng thông tin địa điểm (đo thật: bảng biến mất, không còn gì để xem).
+            if not on_place:
+                self._close_popups(page)
             self.move_mouse_viewport_center(page)
 
             # --- Gõ lại cụm tìm vào ô search RIÊNG của Maps (đã chứng minh: input[name='q']) ---
             typed = False
             try:
+                if on_place:
+                    # đã mở thẳng trang ĐỊA ĐIỂM từ khung bản đồ của Google -> xem luôn, không gõ đè
+                    raise RuntimeError("đã ở trang địa điểm, không cần gõ lại")
                 box = page.locator("input[name='q']").first
                 box.wait_for(state="visible", timeout=8000)
                 self.human_hover(page, box)
                 self.random_sleep(0.4, 1.1)
+                if via_serp:
+                    # vào Maps từ trang kết quả nhưng không phải trang địa điểm: ô tìm có thể đã có chữ -> xoá rồi gõ
+                    try:
+                        box.click(timeout=3000)
+                        page.keyboard.press("Control+A")
+                        page.keyboard.press("Backspace")
+                        self.random_sleep(0.3, 0.8)
+                    except Exception:
+                        pass
                 self.human_type(box, keyword)
                 self.random_sleep(0.8, 1.8)
                 page.keyboard.press("Enter")
                 typed = True
                 print("      + Đã gõ cụm tìm vào ô search của Maps — chờ danh sách kết quả...")
             except Exception as type_err:
-                print(f"      + Không gõ được vào ô search Maps ({type_err}) — dùng nguyên trang đang mở.")
+                if on_place:
+                    print("      + Đã ở trang địa điểm trên Google Maps (từ trang kết quả) — xem luôn, không gõ lại.")
+                else:
+                    print(f"      + Không gõ được vào ô search Maps ({type_err}) — dùng nguyên trang đang mở.")
 
             # Chờ danh sách kết quả render (Maps tải async)
             try:
-                page.locator("div[role='feed'] a[href*='/maps/place/'], div.Nv2PK").first.wait_for(
-                    state="visible", timeout=12000)
+                if not on_place:
+                    page.locator("div[role='feed'] a[href*='/maps/place/'], div.Nv2PK").first.wait_for(
+                        state="visible", timeout=12000)
             except Exception:
                 print("      + Danh sách địa điểm không lên — ngắm trang hiện tại rồi thoát action.")
 
@@ -2193,10 +3078,18 @@ class WarmupWorkflow:
                 except Exception:
                     pass
 
+            # v1.7.8: thỉnh thoảng gõ lại từ khóa kế trong cụm vào ô Maps rồi mới chọn địa điểm
+            if typed and self._refine_search(page, "input[name='q']", "maps", "google_query"):
+                try:
+                    page.locator("div[role='feed'] a[href*='/maps/place/'], div.Nv2PK").first.wait_for(
+                        state="visible", timeout=12000)
+                except Exception:
+                    pass
+
             # --- Bấm 1 địa điểm trong tầm nhìn ---
-            opened_place = False
+            opened_place = on_place   # vào thẳng trang địa điểm thì coi như đã mở
             try:
-                items = page.locator("div.Nv2PK, a[href*='/maps/place/']").all()
+                items = [] if on_place else page.locator("div.Nv2PK, a[href*='/maps/place/']").all()
                 live = []
                 for it in items:
                     try:
@@ -2221,7 +3114,7 @@ class WarmupWorkflow:
                         pass  # click chờ trang tải -> hay timeout; URL poll bên dưới mới quyết định
                     opened_place = True
                     self.random_sleep(2.0, 4.5)
-                else:
+                elif not on_place:
                     print("      + [Bỏ qua] Không có thẻ địa điểm nào đang hiển thị để bấm.")
             except Exception as click_err:
                 print(f"      + Bỏ qua bước bấm địa điểm: {click_err}")
@@ -2646,9 +3539,20 @@ class WarmupWorkflow:
         # là HẠT GIỐNG chủ đề (seed). Mọi action lấy từ khóa từ bước kế tiếp của kế hoạch.
         seed_topic = ((self.session_theme or {}).get("google_query") or "").strip()
         plan = None
-        if self.brain:
-            plan = self._safe_ask_plan(topic_hint=seed_topic)
-        if plan:
+        # v1.8.4: kế hoạch đã được sinh + hiện ở hộp xác nhận (UI gán sẵn plan_steps) -> dùng đúng nó
+        preset_plan = bool(self.plan_steps)
+        if self.keyword_cluster:
+            # v1.7.7: CỤM ĐÃ DUYỆT -> dùng nguyên văn, KHÔNG hỏi AI (không sinh từ khóa mới).
+            print(f"      [Cụm] Dùng nguyên văn {len(self.keyword_cluster)} từ khóa đã duyệt "
+                  f"(lần lượt cho từng hành động, không nhờ AI sinh thêm).")
+        elif preset_plan:
+            print(f"      [Kế hoạch] Dùng kế hoạch ĐÃ DUYỆT {len(self.plan_steps)} bước quanh chủ đề "
+                  f"'{seed_topic}' (không sinh lại).")
+        elif self.brain:
+            plan = self._safe_ask_plan(topic_hint=seed_topic, related=self.related_keywords)
+        if self.keyword_cluster or preset_plan:
+            pass
+        elif plan:
             self.plan_steps = plan
             # Seed vẫn được AI viết lại 1 lần cho gọn (alerts + fallback dùng sau này)
             ai_keyword = self._safe_ask_keyword(topic_hint=seed_topic)
@@ -2683,6 +3587,8 @@ class WarmupWorkflow:
             self.session_deadline_s = deadline_s
             src_deadline = "ngẫu nhiên"
         session_t0 = time.time()
+        # v1.7.8: _refine_search đọc mốc này để không "tìm lại" khi phiên sắp hết giờ
+        self._session_end_ts = session_t0 + deadline_s
         print(f"      [Giới hạn] Phiên này chạy tối đa {_fmt_session_dur(deadline_s)} "
               f"({src_deadline}) — quá mốc thì kết thúc phiên, không ngồi cả buổi.")
 
@@ -2693,6 +3599,8 @@ class WarmupWorkflow:
                 "watch_video": (self.action_watch_video, 0.40),
                 "action_search_youtube": (self.action_search_youtube, 0.60),
                 "action_read_news": (self.action_read_news, 0.20),
+                # v1.8.5: báo quốc tế CNN/BBC/Fox (ngẫu nhiên 1 trang, bấm 1 bài)
+                "read_world_news": (self.action_read_world_news, 0.15),
                 "action_read_wikipedia": (self.action_read_wikipedia, 0.20),
                 "action_manage_google_alerts": (self.action_manage_google_alerts, 0.15),
                 # v1.5.2: Maps vẫn hợp ở pha 3 (tìm địa điểm theo cụm chủ đề)
@@ -2706,6 +3614,7 @@ class WarmupWorkflow:
             # Pha 2: đã login mail — Google hệ sinh thái là trung tâm (Alerts, News, Wikipedia)
             action_map = {
                 "read_news": (self.action_read_news, 0.35),
+                "read_world_news": (self.action_read_world_news, 0.25),  # v1.8.5 CNN/BBC/Fox
                 "search_google": (self.action_search_and_read_news, 0.25),
                 "action_read_wikipedia": (self.action_read_wikipedia, 0.30),
                 "action_manage_google_alerts": (self.action_manage_google_alerts, 0.35),
@@ -2723,6 +3632,7 @@ class WarmupWorkflow:
             # Chỉ lướt web thông tin (báo, Wikipedia, TikTok, Google tin tức) là đủ.
             action_map = {
                 "read_news": (self.action_read_news, 0.35),
+                "read_world_news": (self.action_read_world_news, 0.25),  # v1.8.5 CNN/BBC/Fox
                 "search_google": (self.action_search_and_read_news, 0.25),
                 "action_search_weather": (self.action_search_weather, 0.1),
                 "action_google_finance": (self.action_google_finance, 0.1),
@@ -2751,6 +3661,17 @@ class WarmupWorkflow:
         # v1.5.2: đếm số lần vào TikTok trong phiên để chặn "vào liên tục"
         tiktok_runs = 0
         tiktok_cap = max(1, int(round(total_actions / 3))) if total_actions else 1
+        # v1.8.7: số lượt đọc báo của phiên này (ngẫu nhiên 0/1/2) — không phải phiên nào cũng đọc báo
+        news_runs = 0
+        news_cap = self._roll_news_cap()
+        self.actions_done = 0   # v1.8.9: số hành động ĐÃ chạy thật (báo cáo chu trình dùng số này)
+        self._world_news_seen = set()
+        if any(k in action_map for k in self.NEWS_ACTION_KEYS):
+            if news_cap == 0:
+                print("      [Báo] Phiên này KHÔNG đọc báo (bốc ngẫu nhiên) — dành thời gian cho việc khác.")
+            else:
+                print(f"      [Báo] Phiên này đọc báo tối đa {news_cap} lượt (bốc ngẫu nhiên 0-2), "
+                      f"mỗi lượt 1 trang, không lặp lại cùng báo.")
 
         for i in range(total_actions):
             if self.stop_requested:
@@ -2761,6 +3682,12 @@ class WarmupWorkflow:
             if elapsed >= deadline_s:
                 print(f"\n[!] [Giới hạn] Phiên đã chạy {_fmt_session_dur(elapsed)} "
                       f"(tối đa {_fmt_session_dur(deadline_s)}) — kết thúc phiên sau {i} hành động.")
+                break
+            # v1.8.9 (lô thật: trần 8 phút mà chạy 13m57s vì hành động đọc báo bắt đầu ở 6m31s): còn quá ít
+            # giờ cho 1 hành động trọn vẹn thì kết thúc luôn, không mở hành động mới rồi chạy lố vài phút.
+            if i and deadline_s - elapsed < self.MIN_ACTION_LEFT_S:
+                print(f"\n[!] [Giới hạn] Còn {_fmt_session_dur(deadline_s - elapsed)} (< "
+                      f"{_fmt_session_dur(self.MIN_ACTION_LEFT_S)}) — không mở hành động mới, kết thúc phiên sau {i} hành động.")
                 break
             print(f"\n[*] Hành động thứ {i+1}/{total_actions} "
                   f"(đã chạy {_fmt_session_dur(elapsed)}/{_fmt_session_dur(deadline_s)}):")
@@ -2775,6 +3702,11 @@ class WarmupWorkflow:
                     valid_actions = {k: v for k, v in action_map.items()
                                      if k != "action_watch_tiktok"} or action_map
             
+            # v1.8.7: đủ số lượt đọc báo của phiên -> bỏ mọi hành động đọc báo
+            if news_runs >= news_cap:
+                for _k in self.NEWS_ACTION_KEYS:
+                    valid_actions.pop(_k, None)
+
             # (Fallback an toàn: Nếu anh chỉ bật đúng 1 hành động duy nhất trong action_map thì bỏ qua bộ lọc)
             if not valid_actions:
                 valid_actions = action_map
@@ -2783,11 +3715,25 @@ class WarmupWorkflow:
             action_names = list(valid_actions.keys())
             weights = [data[1] for data in valid_actions.values()]
             
-            chosen_action_name = random.choices(action_names, weights=weights, k=1)[0]
+            chosen_action_name = None
+            self._pending_step_idx = None
+            # v1.8.3: ~80% đi ĐÚNG bước kế tiếp của kế hoạch AI (có logic), ~20% phân tâm ngẫu nhiên
+            if self.plan_steps and not self.keyword_cluster and random.random() < self.PLAN_FOLLOW_P:
+                picked = self._pick_plan_action(valid_actions)
+                if picked:
+                    chosen_action_name, self._pending_step_idx = picked
+                    print(f"      [Kế hoạch] Theo bước {self._pending_step_idx + 1}: "
+                          f"[{self.plan_steps[self._pending_step_idx].get('platform')}] -> {chosen_action_name}")
+            if not chosen_action_name:
+                chosen_action_name = random.choices(action_names, weights=weights, k=1)[0]
             action_function = valid_actions[chosen_action_name][0]
             
             # 3. Ghi nhớ hành động này để chặn ở vòng lặp sau
             last_action_name = chosen_action_name
+            if chosen_action_name in self.NEWS_ACTION_KEYS:
+                news_runs += 1
+                if news_runs >= news_cap:
+                    print(f"      [Báo] Đã đủ {news_runs} lượt đọc báo của phiên — các lượt sau không đọc báo nữa.")
             if chosen_action_name == "action_watch_tiktok":
                 tiktok_runs += 1
                 if tiktok_runs >= tiktok_cap:
@@ -2803,12 +3749,20 @@ class WarmupWorkflow:
                 _status, _err = "error", str(e)
                 raise  # giữ nguyên hành vi cũ: lỗi action vẫn lan lên caller
             finally:
+                self.actions_done += 1
+                # v1.8.3: bước kế hoạch đã chốt mà hành động không dùng tới -> không rơi sang hành động sau
+                self._pending_step_idx = None
                 # 4.5 TASK 5 — Ghi activity-level cho action đọc/lướt.
                 # (2 action YouTube đã tự ghi video-level trong _watch_single_video_logic -> bỏ qua để khỏi double)
                 if chosen_action_name not in ("watch_video", "action_search_youtube"):
                     self._log_activity(page, chosen_action_name, status=_status,
                                        duration_s=round(time.time() - _t0, 1), error=_err)
             
+            # v1.8.9: trình duyệt đã chết thì dừng NGAY (ném lỗi -> chu trình ghi 'error', trả slot + proxy),
+            # không nghỉ 2-8 phút rồi chạy tiếp hành động trên trình duyệt đã đóng.
+            if self._browser_gone(page):
+                raise RuntimeError("Trình duyệt/tab của phiên đã bị đóng giữa chừng — kết thúc phiên sớm.")
+
             # v1.6.4: NGHỈ GIỮA 2 HÀNH ĐỘNG — nhịp "rất chậm ~3-6 phút/trang" (người đọc kỹ).
             # Bản v1.5.8 (25-60s) vẫn để các tác vụ nhanh dồn 2-3 activity cùng 1 phút, nhìn rõ
             # là bot. Giãn mạnh qua _sample_action_rest (trung vị ~180s) để lịch sử trình duyệt
@@ -2846,6 +3800,13 @@ class WarmupWorkflow:
     def _simulate_scroll_and_read(self, page, min_seconds=120, max_seconds=500):
         """Cuộn trang liên tục và tự động diệt quảng cáo"""
         read_time_seconds = random.randint(min_seconds, max_seconds)
+        # v1.8.9: phiên sắp hết giờ thì đọc ngắn lại (lố tối đa ~45s) thay vì đọc trọn 2.5-5.5 phút rồi lố trần
+        end_ts = getattr(self, "_session_end_ts", 0) or 0
+        if end_ts:
+            cap = max(30, int(end_ts - time.time()) + self.READ_OVERRUN_S)
+            if read_time_seconds > cap:
+                print(f"      + Phiên sắp hết giờ — đọc rút gọn ~{cap}s (thay vì ~{read_time_seconds}s).")
+                read_time_seconds = cap
         print(f"      + Đang tập trung đọc nội dung bài viết trong ~{read_time_seconds}s...")
         
         end_time = time.time() + read_time_seconds

@@ -262,12 +262,13 @@ check("TikTok: co comment giai thich nang 0.5 -> 0.75",
 check("TikTok: co liec sang thumb video ke tiep",
       'page.locator("video:visible").nth(1)' in tiktok)
 check("TikTok: van giu nhip tim '...dang xem video'", "...\u0111ang xem video" in tiktok)
-check("TikTok: van giu nhanh 'Quet nhe xem truoc video ke'",
-      "xem tr\u01b0\u1edbc video k\u1ebf r\u1ed3i k\u00e9o v\u1ec1" in tiktok)
+# v1.8.0: nhanh "quet nhe roi keo ve" BI BO (gay nay 39-59 lan) -> thay bang quay lai video truoc
+check("TikTok: v1.8.0 thay probe bang 'Quay lai video truoc'",
+      "Quay l\u1ea1i video tr\u01b0\u1edbc" in tiktok)
 check("TikTok: van giu 'Dung chut, tro chuot ngam video dang xem'",
       "\u0111ang xem (ki\u1ec3u xem l\u01b0\u1edbt)" in tiktok)
-check("TikTok: van giu cuon sang video tiep theo",
-      "Cu\u1ed9n sang video ti\u1ebfp theo" in tiktok)
+check("TikTok: v1.8.0 bam sang video tiep theo (nut cua TikTok)",
+      "B\u1ea5m sang video ti\u1ebfp theo" in tiktok)
 
 sweep = code.split("def _preview_sweep_browse")[1].split("def action_watch_tiktok")[0]
 sweep_doc = sweep.split('"""')[1]
@@ -454,14 +455,17 @@ check("v1.5.1 do that: _human_scroll chieu NGUOC (keo ve) van chay",
 # --- TikTok: khong con smooth_scroll, co _human_scroll ---
 check("v1.5.1: TikTok khong con goi smooth_scroll (nguon git chinh)",
       "self.smooth_scroll(" not in ttk_blk)
-check("v1.5.1: TikTok dung _human_scroll cho ca 3 cuon (probe x2 + chuyen video)",
-      ttk_blk.count("self._human_scroll(") == 3,
+# v1.8.0: 3 check duoi day tung GHIM dung hanh vi gay GIAT (do that 19/11/2026: lan 18-30
+# nac tren feed scroll-snap -> video nay 37-59 lan, 0/5 lan sang video). TikTok nay bam nut
+# "Di den video tiep theo" (_tiktok_go) -> doi check sang hanh vi moi.
+check("v1.8.0: TikTok KHONG con lan _human_scroll (nguon giat do duoc)",
+      ttk_blk.count("self._human_scroll(") == 0,
       f"{ttk_blk.count('self._human_scroll(')} call site")
-check("v1.5.1: cuon chuyen video van du 1 viewport + 50-200px",
-      "self._human_scroll(page, vh + random.randint(50, 200))" in ttk_blk)
-check("v1.5.1: probe van xuong 0.4-0.7 vh roi keo NGUOC 100-300px",
-      "self._human_scroll(page, int(vh * random.uniform(0.4, 0.7)))" in ttk_blk
-      and "self._human_scroll(page, -random.randint(100, 300))" in ttk_blk)
+check("v1.8.0: chuyen video bang nut cua TikTok + xac nhan",
+      'self._tiktok_go(page, "next")' in ttk_blk)
+check("v1.8.0: bo probe nua man hinh, thay bang quay lai video truoc",
+      "int(vh * random.uniform(0.4, 0.7))" not in ttk_blk
+      and 'self._tiktok_go(page, "prev")' in ttk_blk)
 
 # --- watch time: khong con phoi deu 12-35s ---
 check("v1.5.1: BO phoi deu random.uniform(12, 35) (E2E ra 27/27/32/24/20/21s)",

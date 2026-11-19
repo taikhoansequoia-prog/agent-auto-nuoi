@@ -38,6 +38,10 @@ DEFAULTS = {
     "target_cycle_minutes": 0,  # v1.4.0: mục tiêu phút cho 1 chu trình (0 = không giới hạn)
     "daily_minutes": 30,     # v1.5.3: hạn mức PHÚT/NGÀY cho mỗi acc (0 = tắt hạn mức)
     "pinned_theme": "",      # v1.5.3: ghim chủ đề cho phiên ("" = bot tự chọn trong danh sách)
+    # v1.7.3: nút "Sinh chủ đề" sinh BAO NHIÊU chủ đề con cho MỖI dòng gốc.
+    # Trước đây tổng số = số profile đang tick -> 4 dòng + 4 profile = 1 chủ đề/dòng, nút Sinh
+    # chỉ chép lại thứ user vừa gõ. Giờ số lượng do dòng gốc quyết định, không phải số profile.
+    "topics_per_seed": 5,
     "keyword_lang": "en",    # v1.6.1: ngôn ngữ từ khóa (vi/en/ja/ko) — chi phối sinh chủ đề + runtime
     "pane_sash": [],         # v1.6.7: vị trí 2 thanh kéo chia vùng (cấu hình | chủ đề | log), [] = mặc định
     # v1.4.8: cổng mật khẩu cho tiện ích "QUẢN LÝ API KEY" (PBKDF2, salt+hash hex;

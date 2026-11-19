@@ -463,8 +463,8 @@ root.update()
 ed = find_toplevel("Sửa GEMINI_API_KEY")
 check("mở dialog Sửa GEMINI_API_KEY", ed is not None)
 ents = find_all(ed, ttk.Entry)
-check("dialog sửa có 3 Entry (tên + value + endpoint)", len(ents) == 3, str(len(ents)))
-if len(ents) == 3:
+check("dialog sửa có 4 Entry (tên + value + endpoint + model v1.7.6)", len(ents) == 4, str(len(ents)))
+if len(ents) == 4:
     check("ents[0] = tên key", ents[0].get() == "GEMINI_API_KEY", ents[0].get())
     check("ents[2] = endpoint NẠP SẴN giá trị cũ",
           ents[2].get() == "https://gem-custom.example/v1", ents[2].get())
@@ -511,9 +511,9 @@ root.update()
 ed = find_toplevel("Sửa GEMINI_API_KEY")
 ents = find_all(ed, ttk.Entry)
 check("mở lại dialog: ents[2] nạp endpoint MỚI",
-      len(ents) == 3 and ents[2].get() == "https://gem-NEW-gateway/v1",
-      ents[2].get() if len(ents) == 3 else str(len(ents)))
-if len(ents) == 3:
+      len(ents) == 4 and ents[2].get() == "https://gem-NEW-gateway/v1",
+      ents[2].get() if len(ents) == 4 else str(len(ents)))
+if len(ents) == 4:
     set_entry(ents[2], "   ")  # khoảng trắng = trống
     click_btn(ed, "Lưu")
     root.update()
@@ -535,8 +535,8 @@ root.update()
 nd = find_toplevel("Thêm API key")
 check("mở dialog Thêm API key", nd is not None)
 nents = find_all(nd, ttk.Entry)
-check("dialog thêm cũng có 3 Entry", len(nents) == 3, str(len(nents)))
-if len(nents) == 3:
+check("dialog thêm cũng có 4 Entry (v1.7.6 +model)", len(nents) == 4, str(len(nents)))
+if len(nents) == 4:
     check("dialog thêm: ents[2] trống mặc định", nents[2].get() == "", nents[2].get())
     set_entry(nents[0], "new key-9")
     set_entry(nents[1], "nv42")
@@ -671,17 +671,25 @@ check("brain_manager không còn hardcode DashScope mà không đọc env",
       bm.count("dashscope.aliyuncs.com/compatible-mode/v1") == 1)
 
 gb = src_of("src/agent/gemini_brain.py")
-check("gemini_brain nhận endpoint=None (model cập nhật gemini-flash-latest v1.5.9)",
-      "def __init__(self, api_key: str, model_name=\"gemini-flash-latest\", endpoint=None):" in gb)
+# v1.7.3 VÁ CÓ CHỦ ĐÍCH: 'gemini-flash-latest' ĐO ĐƯỢC là TREO >120s (không 404,
+# không báo lỗi) trong khi CÙNG key đó GET /models trả 200 trong 0.3s -> đổi mặc
+# định sang model thật sự trả lời (1.4s), kèm chuỗi dự phòng _GEMINI_MODELS.
+check("gemini_brain nhận endpoint=None (v1.7.3: model mặc định gemini-3-flash-preview)",
+      # v1.7.1: chữ ký xuống dòng vì thêm api_keys= (xoay vòng key) -> bỏ ")" cuối,
+      # vẫn ghim đủ thứ tự api_key/model/endpoint + model mặc định.
+      "def __init__(self, api_key: str, model_name=\"gemini-3-flash-preview\", endpoint=None" in gb)
 check("gemini_brain thử api_endpoint", "api_endpoint=endpoint" in gb)
 check("gemini_brain có fallback TypeError", "except TypeError:" in gb)
 
 ob = src_of("src/agent/openai_brain.py")
-check("openai_brain threading base_url vào kwargs", 'kwargs["base_url"] = base_url' in ob)
+# v1.7.2: base_url nay la thuoc tinh instance (self.base_url) vi _make_client dung lai
+# cho tung key khi xoay vong -> van la "threading base_url vao kwargs", chi doi bien.
+check("openai_brain threading base_url vào kwargs",
+      'kwargs["base_url"] = self.base_url' in ob or 'kwargs["base_url"] = base_url' in ob)
 
 um = src_of("src/ui_main.py")
 check("ui_main: dòng _ENDPOINT bị ẩn",
-      "and not api_vault.is_endpoint_key(k)]" in um)
+      "and not api_vault.is_endpoint_key(k)" in um)
 check("ui_main: nhãn Cổng tự đặt/mặc định",
       'text=("Cổng: " + endpoint) if endpoint else "Cổng: chính (mặc định)",' in um)
 check("ui_main: màu accent khi có endpoint",

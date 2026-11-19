@@ -13,7 +13,9 @@ class AntidetectAPI:
     def open_profile(self, profile_id):
         """Mở profile và lấy địa chỉ WebSocket (ws://) cho Playwright"""
         url = f"{self.base_url}/api/v1/profiles/start/{profile_id}"
-        
+        # v1.7.5: giữ lý do lỗi để UI báo đúng nguyên nhân (vd BrowserNotFound = thiếu nhân trình duyệt)
+        self.last_error = ""
+
         try:
             print(f"[*] Đang yêu cầu API mở Profile ID: {profile_id}...")
             
@@ -42,11 +44,33 @@ class AntidetectAPI:
                     return ws_url
             
             print(f"  [-] Lỗi từ nội dung API (Không tìm thấy link ws): {result}")
+            msg = str(result.get("message") or "")
+            if msg == "BrowserNotFound":
+                ver = self._profile_browser_version(profile_id)
+                self.last_error = (f"GPM chưa có nhân trình duyệt {ver or ''} cho profile này (BrowserNotFound). "
+                                   "Mở 1 profile cùng phiên bản bằng tay trong GPM Login để GPM tải nhân về, rồi chạy lại.")
+            elif msg == "DownloadProfileFailed":
+                # v1.8.9: gặp thật 19/11 (Profile warmup 1/2/3) — GPM không tải được dữ liệu profile về máy
+                self.last_error = ("GPM không tải được dữ liệu profile này về máy (DownloadProfileFailed). "
+                                   "Mở profile bằng tay trong GPM Login 1 lần (kiểm tra mạng / đồng bộ cloud / "
+                                   "dung lượng ổ đĩa), mở được rồi thì chạy lại.")
+            else:
+                self.last_error = msg or "API không trả link ws"
             return None
             
         except requests.exceptions.RequestException as e:
             print(f"  [-] Lỗi kết nối mạng tới API: {e}")
+            self.last_error = f"Không kết nối được GPM API: {e}"
             return None
+
+    def _profile_browser_version(self, profile_id):
+        """Lấy 'chrome 155.0.x' của profile (best-effort, '' khi lỗi)."""
+        try:
+            r = requests.get(f"{self.base_url}/api/v1/profiles/{profile_id}", timeout=3).json()
+            b = (r.get("data") or {}).get("browser") or {}
+            return f"{b.get('name', '')} {b.get('version', '')}".strip()
+        except Exception:
+            return ""
 
     def get_profile_name(self, profile_id):
         """Gọi API lấy chi tiết profile để trích xuất tên hiển thị cho UI"""
@@ -79,6 +103,29 @@ class AntidetectAPI:
         except Exception as e:
             print(f"[-] list_groups lỗi: {e}")
             return {}
+
+    def get_proxy_map(self, page_size=50, max_pages=20):
+        """v1.8.1: {profile_id: raw_proxy} của MỌI profile (GET /api/v1/profiles phân trang
+        bằng `page`). Lỗi -> {} (caller coi như không biết proxy -> không chặn trùng)."""
+        out = {}
+        try:
+            for page in range(1, max_pages + 1):
+                url = f"{self.base_url}/api/v1/profiles?page={page}&page_size={page_size}"
+                response = requests.get(url, timeout=5)
+                if response.status_code != 200:
+                    break
+                data = (response.json() or {}).get("data", {})
+                items = data.get("data") or []
+                if not items:
+                    break
+                for p in items:
+                    if p.get("id"):
+                        out[p["id"]] = (p.get("raw_proxy") or "").strip()
+                if page >= (data.get("last_page") or page):
+                    break
+        except Exception as e:
+            print(f"[-] get_proxy_map lỗi: {e}")
+        return out
 
     def list_profiles(self, page_size=50, max_pages=20):
         """Sprint 1.2: kéo DANH SÁCH profile từ GPM Login (phân trang).
@@ -116,6 +163,8 @@ class AntidetectAPI:
                         "browser": browser,
                         "firefox": browser.lower() == "firefox",
                         "group": gmap.get(p.get("group_id"), ""),
+                        # v1.8.1: proxy thô (ip:port:user:pass) — để lịch chạy chặn trùng IP
+                        "proxy": (p.get("raw_proxy") or "").strip(),
                     })
                 last_page = data.get("last_page") or page
                 if page >= last_page:
