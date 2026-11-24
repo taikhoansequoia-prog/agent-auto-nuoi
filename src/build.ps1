@@ -10,6 +10,13 @@
 param([string]$Version = "")
 $ErrorActionPreference = "Stop"
 $Py = "C:\Users\Admin\AppData\Local\Python\pythoncore-3.14-64\python.exe"
+# v1.9.3: may khac khong co duong dan tren -> dung python dang co tren PATH (phai co PyInstaller)
+if (-not (Test-Path $Py)) {
+    $cmd = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $cmd) { Write-Host "[build] Khong tim thay python nao de build." -ForegroundColor Red; exit 1 }
+    $Py = $cmd.Source
+    Write-Host "[build] Dung python tren PATH: $Py" -ForegroundColor Yellow
+}
 $Root = $PSScriptRoot
 
 # 1. Dong app dang chay (neu co)

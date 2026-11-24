@@ -60,6 +60,11 @@ class BrainManager:
         'claude-sonnet', 'claude-haiku'.
         Import module brain một cách lười biếng (lazy) để tránh ép cài tất cả SDK.
         """
+        if brain_type in ("claude-account", "chatgpt-account"):
+            # v1.12.0: AI qua TÀI KHOẢN ĐĂNG NHẬP (Claude Code / Codex) — không API key. Chưa cài/chưa đăng nhập -> ném lỗi.
+            from .account_brain import get_account_brain
+            return get_account_brain(brain_type)
+
         if brain_type == "gemini":
             from .gemini_brain import GeminiBrain
             # v1.7.1: nhiều key -> xoay vòng; 1 key -> y hệt trước đây.

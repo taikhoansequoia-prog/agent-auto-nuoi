@@ -42,3 +42,7 @@ current_target.png
 test_screenshot.png
 test_screenshot_marked.png
 *.lnk
+
+# Ban nen ma nguon + cai dat rieng cua Claude Code tren may (khong commit)
+src.zip
+**/.claude/settings.local.json

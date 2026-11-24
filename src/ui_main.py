@@ -28,7 +28,7 @@ try:
     )
 except ImportError:  # pragma: no cover - chỉ xảy ra với bản DB cũ
     STAGE0_DAYS, HAGRID_DAYS = 4, 7
-    VALID_PHASES = ("clean", "mail", "youtube")
+    VALID_PHASES = ("clean", "mail", "youtube", "channel")
     STAGE_CODES = ["S0", "S1", "S2", "S3", "S4", "S5"]
     STAGE_NAMES, STAGE_SHEET_LABELS = {}, {}
 
@@ -41,13 +41,17 @@ except ImportError:  # pragma: no cover - chỉ xảy ra với bản DB cũ
     def suggested_phase(stage):
         return "youtube" if stage in ("S4", "S5") else "clean"
 from src.workflow.warmup import WarmupWorkflow
+from src.workflow import channel_mode  # v1.9.3: chế độ 4 — ngâm kênh theo niche
+from src.workflow import niche_learner  # v1.9.4: học niche từ kênh đối thủ qua YouTube Data API
 from src.agent.brain_manager import BrainManager
+from src.agent import account_brain  # v1.12.0: Claude / ChatGPT qua tài khoản đăng nhập (không API key)
 from src.logger import append_line, LOG_DIR
 from src.version import get_version_line
 from src.app_config import load_config, save_config
 from src import api_vault
 from src import lang_profiles
 from src import telegram_bot
+from src import qa_agent
 
 # ==========================================
 # SPRINT 1.5: nhãn phase "ngôn ngữ người vận hành" -> key nội bộ (warmup.py GIỮ NGUYÊN)
@@ -56,8 +60,10 @@ PHASE_LABELS = [
     "1 - Acc mới — chưa có gì",
     "2 - Đã có mail — nuôi Google",
     "3 - Cày YouTube — được Sub",
+    "4 - Ngâm kênh — theo niche",   # v1.9.3: phiên 5 bước theo SOP ngâm kênh (workflow/channel_mode.py)
 ]
-PHASE_MAP = {PHASE_LABELS[0]: "clean", PHASE_LABELS[1]: "mail", PHASE_LABELS[2]: "youtube"}
+PHASE_MAP = {PHASE_LABELS[0]: "clean", PHASE_LABELS[1]: "mail", PHASE_LABELS[2]: "youtube",
+             PHASE_LABELS[3]: "channel"}
 PHASE_LABEL_BY_KEY = {v: k for k, v in PHASE_MAP.items()}
 
 # ==========================================
@@ -136,6 +142,28 @@ PHASE_DETAILS = {
                   "nối nhau quanh MỘT chủ đề xuyên suốt (Maps/YouTube/Wikipedia lấy từ khóa theo từng bước, không theo cặp). "
                   "Trần thời gian mỗi phiên 15-30 phút."),
     },
+    # v1.9.3: chế độ 4 KHÔNG bốc hành động theo trọng số — chạy TUẦN TỰ 5 bước (cột "Trọng số" = thứ tự bước).
+    "channel": {
+        "goal": ("Chế độ 4 — NGÂM KÊNH THEO NICHE (SOP Giai đoạn 3, Ngày 8–30). Mỗi phiên từ 45–60 phút (dài hơn nếu video đối thủ dài) đi TUẦN TỰ "
+                 "5 bước để dạy thuật toán YouTube biết kênh này thuộc niche nào: chỉ xem video đúng niche "
+                 "(từ khóa đuôi dài + kênh đối thủ nhập ở nút 'Niche ngâm kênh'). Cột 'Trọng số' = thứ tự bước."),
+        "actions": [
+            ("Bước 1a · Đồng bộ vùng/ngôn ngữ", 1.0, "Kiểm tra YouTube: Location = United States, Display language = English. Sai thì mở menu tài khoản đổi lại; đúng rồi thì không đụng.", None),
+            ("Bước 1b · Tín hiệu Google → YouTube", 1.1, "Lên Google gõ 1 từ khóa niche, đọc 1 bài (ưu tiên Wikipedia) ~2 phút, quay lại bấm tab 'Video', bấm 1 kết quả YouTube và xem vài phút.", None),
+            ("Bước 2 · Gieo từ khóa + lọc VPH", 2.0, "Gõ từ khóa đuôi dài vào ô tìm kiếm YouTube, lọc 'Tuần này/Hôm nay' + 'Mức độ phổ biến', đọc lượt xem và tuổi video trên trang để tính lượt xem/giờ, chọn video đúng niche đang lên.", None),
+            ("Bước 3 · Xem sâu 3–5 video dài", 3.0, "Video 1 xem 70–90%, video sau 50–60%. Số video và trần xem tính theo ĐỘ DÀI VIDEO ĐỐI THỦ (ô 'Video đối thủ dài' của niche > số học qua YouTube API > bot tự đo ở lần tìm đầu): video ngắn thì xem thêm video cho đủ ~45 phút, video dài thì phiên dài theo (tối đa 150 phút). Bỏ qua quảng cáo (10% để quảng cáo ngắn <15s chạy), không tắt tiếng, âm lượng >30%, thỉnh thoảng tua ±10s, cuộn đọc bình luận.", None),
+            ("Bước 3b · Lướt 2–3 Shorts", 3.5, "Khoảng 40% số phiên: bấm chip Shorts ở trang kết quả, xem 2–3 Shorts cùng chủ đề.", None),
+            ("Bước 4 · Luyện trang chủ", 4.0, "Bấm logo về Home, cuộn, CHỈ bấm 1–2 video đúng niche (chấm điểm theo từ khóa + kênh đối thủ, có AI Brain thì nhờ AI chọn) xem 2–5 phút. Không có video đúng niche thì không bấm.", None),
+            ("Bước 5 · Đóng phiên", 5.0, "Đóng tab, profile đóng đúng cách để lưu cookie.", None),
+        ],
+        "notes": ("KHÔNG BAO GIỜ viết bình luận. Like video / like bình luận của người khác / Đăng ký kênh đều RẤT THƯA và "
+                  "ngẫu nhiên, bốc 1 lần đầu phiên: like video ~1 lần/3–4 phiên (tối đa 1/ngày, chỉ ở video xem sâu đúng niche "
+                  "đã xem ≥70%); like bình luận ~1 lần/8 phiên (tối đa 1/ngày); đăng ký ~1 lần/8 phiên (tối đa 1/ngày, 2/tuần). "
+                  "Profile chưa đăng nhập YouTube thì phiên chỉ xem. Kiểm tra IP (Whoer/IPHey) do người vận hành tự làm. "
+                  "Chế độ này chỉ chạy khi chọn tay ở combobox (tick 'Ép tất cả acc') hoặc ghim tay cho từng acc — giai đoạn sheet "
+                  "không tự chuyển sang. Hạn mức 'Phút/ngày' vẫn áp dụng và là trần cứng của phiên: thiếu thì bot bớt video / hạ mức xem; muốn đủ phiên thì đặt 60–150 hoặc 0 (tắt). "
+                  "2 ô tick 'Bỏ qua YouTube' / 'Bỏ qua từ khóa ngẫu nhiên' không ảnh hưởng chế độ này."),
+    },
 }
 
 # ==========================================
@@ -181,6 +209,9 @@ SLOT_LAST_LOG = {}      # "Slot N" -> epoch float lần cuối có log
 # 15 phút: nhịp im lặng HỢP LỆ dài nhất là nghỉ giữa 2 hành động (tối đa 8 phút).
 WATCHDOG_SILENT_S = 900
 SLOT_API = {}           # "Slot N" -> (api, profile_id) của profile đang chạy
+# v1.9.3: profile_id -> niche (dict) của acc chạy chế độ 4 "Ngâm kênh", chốt lúc bấm Start.
+# Đi qua map module (như SLOT_*) để KHÔNG đổi arity worker_wrapper/_worker_body/run_single_profile.
+NICHE_BY_PID = {}
 _WATCHDOG_DONE = set()  # (slot_key, profile_id) đã giải cứu — mỗi chu trình 1 lần
 
 
@@ -753,6 +784,16 @@ def _explain_brain_error(err):
     return str(err).strip().replace("\n", " ")[:120]
 
 
+def _apply_account_models(cfg):
+    """v1.13.0: model user chọn cho 2 AI tài khoản (config) -> biến môi trường mà account_brain đọc. Trống = mặc định."""
+    for key, env in (("claude_account_model", "CLAUDE_CLI_MODEL"), ("chatgpt_account_model", "CODEX_CLI_MODEL")):
+        v = str((cfg or {}).get(key) or "").strip()
+        if v:
+            os.environ[env] = v
+        else:
+            os.environ.pop(env, None)
+
+
 def _pick_live_brain(candidates, log=None):
     """v1.7.3: thử lần lượt tới khi gặp brain THỰC SỰ trả lời được.
 
@@ -962,7 +1003,7 @@ def generate_topics_for_seeds(seeds, n, brain=None, rng=None, log=None, lang="en
     return out[:n]
 
 
-def run_single_profile(api, profile_id, profile_name, themes, slot_index, screen_w, screen_h, skip_youtube, skip_random_keywords, brain_type="none", phase="clean", fixed_target_s=0, daily_seconds=0, pinned_theme="", assigned_theme=None, keyword_lang="en"):
+def run_single_profile(api, profile_id, profile_name, themes, slot_index, screen_w, screen_h, skip_youtube, skip_random_keywords, brain_type="none", phase="clean", fixed_target_s=0, daily_seconds=0, pinned_theme="", assigned_theme=None, keyword_lang="en", niche=None):
     print(f"\n[{profile_name}] 🚀 Đang yêu cầu API mở trình duyệt...")
     
     db = DatabaseHandler()
@@ -1097,6 +1138,14 @@ def run_single_profile(api, profile_id, profile_name, themes, slot_index, screen
             # v1.7.7: CỤM TỪ KHÓA đã duyệt -> dùng nguyên văn, lần lượt (gán sau khi tạo,
             # giống session_deadline_s, để không đổi chữ ký WarmupWorkflow).
             warmup.keyword_cluster = _cluster_ordered
+            # v1.9.3: chế độ 4 — gán niche đã chọn cho acc này (rỗng -> channel_mode tạm dùng từ khóa phiên)
+            if phase == "channel":
+                warmup.niche = dict((niche if niche is not None else NICHE_BY_PID.get(profile_id)) or {})
+                if warmup.niche.get("name"):
+                    print(f"[{profile_name}] 🎯 Niche ngâm kênh: {warmup.niche.get('name')}")
+                else:
+                    print(f"[{profile_name}] ⚠️ Chưa có niche cho acc này — mở nút 'Niche ngâm kênh' để nhập "
+                          f"(tạm dùng từ khóa của phiên).")
             # v1.8.4: kế hoạch đã hiện ở hộp xác nhận -> dùng đúng nó (không sinh lại)
             _plan = list((assigned_theme or {}).get("plan") or [])
             if _plan:
@@ -1122,11 +1171,36 @@ def run_single_profile(api, profile_id, profile_name, themes, slot_index, screen
                     if warmup.session_deadline_s > _left:
                         warmup.session_deadline_s = _left
                         print(f"[{profile_name}] ⏳ Trần phiên siết theo hạn mức ngày: {_fmt_dur(_left)}")
-                elif _left < 1800:
+                elif _left < (3600 if phase == "channel" else 1800):
+                    # v1.9.3: phiên ngâm kênh tự chọn 45-60 phút nên ngưỡng siết là 60 phút (pha khác 30 phút)
                     warmup.session_deadline_s = _left
                     print(f"[{profile_name}] ⏳ Trần phiên siết theo hạn mức ngày: {_fmt_dur(_left)}")
+                elif phase == "channel":
+                    # v1.9.5: phiên ngâm kênh dài theo video đối thủ (có thể > 60 phút) -> hạn mức còn lại là trần cứng
+                    warmup.channel_max_s = _left
+            # v1.9.5: phiên ngâm kênh dài/ngắn theo ĐỘ DÀI VIDEO ĐỐI THỦ (ô nhập ở niche > học qua API > tự đo)
+            _typ = _need_lo = _need_hi = 0
+            if phase == "channel":
+                try:
+                    _typ = int(channel_mode.normalize_niche(warmup.niche).get("typical_len_s") or 0)
+                    if _typ:
+                        _need_lo, _need_hi = channel_mode.session_range_min(_typ)
+                except Exception:
+                    _typ = 0
+                _cap = int(warmup.session_deadline_s or getattr(warmup, "channel_max_s", 0) or 0)
+                if 0 < _cap < (_need_lo or 45) * 60 * 0.85:
+                    print(f"[{profile_name}] ⚠️ Phiên ngâm kênh chỉ còn {_fmt_dur(_cap)} — "
+                          + (f"video đối thủ dài ~{_typ // 60} phút cần khoảng {_need_lo}-{_need_hi} phút"
+                             if _typ else "SOP cần 45-60 phút")
+                          + ". Bot sẽ bớt video / hạ mức xem cho vừa; muốn đủ phiên thì tăng 'Phút/ngày' (0 = tắt hạn mức).")
             if fixed_target_s and fixed_target_s > 0:
                 print(f"[{profile_name}] ⏳ Trần phiên: {_fmt_dur(int(fixed_target_s))} (theo mục tiêu đã ghim)")
+            elif phase == "channel" and _typ:
+                print(f"[{profile_name}] ⏳ Trần phiên: tính theo video đối thủ dài ~{_typ // 60} phút "
+                      f"→ khoảng {_need_lo}-{_need_hi} phút")
+            elif phase == "channel":
+                print(f"[{profile_name}] ⏳ Trần phiên: bot tự đo độ dài video đối thủ ở lần tìm đầu rồi tính "
+                      f"(chưa đo được thì 45-60 phút)")
             else:
                 print(f"[{profile_name}] ⏳ Trần phiên: bot tự chọn 15-30 phút (không ngồi cả buổi)")
 
@@ -1139,6 +1213,10 @@ def run_single_profile(api, profile_id, profile_name, themes, slot_index, screen
                 target_s = int(fixed_target_s)  # người dùng ghim số phút cố định
                 _cyc["target_s"] = target_s
                 print(f"[{profile_name}] 🎯 Mục tiêu vòng (cố định): {_fmt_dur(target_s)}")
+            elif phase == "channel":
+                # v1.9.3: phiên ngâm kênh có trần riêng 45-60 phút — không bốc "mục tiêu vòng" vài phút
+                target_s = 0
+                _cyc["target_s"] = None
             else:
                 _auto_min = max(1, total_actions - 1)
                 target_s = random.randint(0, _auto_min) * 60
@@ -1273,6 +1351,13 @@ def _worker_body(app_instance, profile_id, themes, slots_queue, screen_w, screen
         # (test_v153 assert đúng chuỗi 'pinned_theme)' là tham số cuối của các dòng đó).
         _amap = getattr(app_instance, "_assignment_map", None) or {}
         _assigned = _amap.get(profile_id)
+        # v1.9.2: chế độ chạy RIÊNG của acc này (theo giai đoạn sheet, tính ở start_automation);
+        # không có trong map -> giữ `phase` mặc định truyền vào (call site cũ/test không đổi).
+        _pmap = getattr(app_instance, "_phase_by_pid", None) or {}
+        _ph = _pmap.get(profile_id) or phase
+        if _ph != phase:
+            print(f"[{profile_id[:8]}] 🧭 Chế độ chạy theo giai đoạn: {PHASE_LABEL_BY_KEY.get(_ph, _ph)}")
+        phase = _ph
         run_single_profile(api, profile_id, profile_name, themes, slot, screen_w, screen_h, skip_youtube, skip_random_keywords, brain_type, phase, fixed_target_s, daily_seconds, pinned_theme, _assigned, keyword_lang)
     finally:
         SLOT_THREAD_ALIVE[slot_key] = False
@@ -1388,6 +1473,7 @@ class AutomationApp:
             self.chk_theme.config(text=self._theme_btn_text())
         except Exception:
             pass
+        self._qa_retag()   # v1.9.1: màu chữ theo vai trong cửa sổ Hỏi đáp (tag của Text không tự remap)
         # lưu ngay best-effort (không chờ đóng app)
         self.cfg = dict(self.cfg)
         self.cfg["theme"] = self.theme_name
@@ -1614,7 +1700,8 @@ class AutomationApp:
         menu_report.add_command(label="Bảng tài khoản", command=self.show_account_dashboard)
         menu_report.add_command(label="Xuất CSV", command=self.export_activity_csv)
         menu_report.add_separator()
-        menu_report.add_command(label="Mốc nuôi acc (7 ngày)", command=self.show_stage_timeline)
+        # v1.9.2: "Mốc nuôi acc (7 ngày)" gộp vào tab GIAI ĐOẠN NGÂM (một chỗ duy nhất);
+        # show_stage_timeline/btn_timeline giữ làm đối tượng ẩn cho tương thích.
         menu_report.add_command(label="Thời gian ngâm (chu trình)", command=self.show_cycle_time_dialog)
         menu_report.add_command(label="Giai đoạn ngâm (S0 → S5)", command=self.show_stage_board)
         self.mbtn_report["menu"] = menu_report
@@ -1633,6 +1720,16 @@ class AutomationApp:
         menu_tools.add_checkbutton(label="Chỉ hiện lỗi + cảnh báo trong log",
                                    variable=self.var_log_errors, command=self._apply_log_filter)
         self.mbtn_tools["menu"] = menu_tools
+
+        # v1.9.1: HỎI ĐÁP AI (chỉ đọc). Nút riêng trên thanh công cụ và KHÔNG bị khóa khi đang chạy —
+        # hỏi "profile nào đang kẹt" giữa lúc chạy mới là lúc cần nhất.
+        self.btn_qa = ttk.Button(toolbar, text="Hỏi đáp AI", style="Tool.TButton", command=self.open_qa_agent)
+        self.btn_qa.pack(side="left", padx=4, pady=4)
+        # v1.9.3: nhập NICHE cho chế độ 4 "Ngâm kênh" (từ khóa đuôi dài + kênh đối thủ). Không khóa khi đang
+        # chạy: phiên đang chạy đã chốt niche lúc bấm Start, sửa ở đây chỉ có hiệu lực từ lần chạy sau.
+        self.btn_niche = ttk.Button(toolbar, text="Niche ngâm kênh", style="Tool.TButton",
+                                    command=self.open_niche_manager)
+        self.btn_niche.pack(side="left", padx=4, pady=4)
 
         # --- v1.6.7: khung chia dọc kéo được — 3 ngăn: cấu hình | chủ đề | log ---
         self.main_pane = ttk.Panedwindow(root, orient="vertical", style="Main.TPanedwindow")
@@ -1698,6 +1795,14 @@ class AutomationApp:
         # Lọc nhanh khi danh sách dài (tìm theo tên hoặc ID) + lọc theo nhóm (v1.3.6)
         prof_filter_row = ttk.Frame(card_prof)
         prof_filter_row.pack(fill="x", pady=(8, 2))
+        # v1.9.2: cách chia mục danh sách — theo GIAI ĐOẠN SHEET (mặc định) hay nhóm GPM (cũ)
+        ttk.Label(prof_filter_row, text="Xếp theo:", style="Muted.TLabel").pack(side="left")
+        self.var_prof_groupby = tk.StringVar(value=self.PROF_GROUPBY_LABELS["stage"])
+        self.cbo_prof_groupby = ttk.Combobox(prof_filter_row, textvariable=self.var_prof_groupby,
+                                             values=list(self.PROF_GROUPBY_LABELS.values()),
+                                             state="readonly", width=10)
+        self.cbo_prof_groupby.pack(side="left", padx=(4, 10))
+        self.cbo_prof_groupby.bind("<<ComboboxSelected>>", self._on_groupby_changed)
         self._lbl_group_filter = ttk.Label(prof_filter_row, text="Nhóm:", style="Muted.TLabel")
         self.var_prof_group = tk.StringVar(value=GROUP_ALL)
         self.cbo_prof_group = ttk.Combobox(prof_filter_row, textvariable=self.var_prof_group,
@@ -1756,7 +1861,9 @@ class AutomationApp:
         self.lbl_brain_hint.grid(row=3, column=1, sticky="w", padx=(10, 0))
         self.cbo_brain.bind("<<ComboboxSelected>>", self._on_brain_type_changed)
 
-        ttk.Label(card_cfg, text="Chế độ ngâm:").grid(row=4, column=0, sticky="w", pady=(8, 0))
+        # v1.9.2: combobox giờ là chế độ MẶC ĐỊNH (acc chưa đặt ngày). Acc đã đặt ngày chạy theo
+        # giai đoạn sheet của riêng nó (ghim tay > suy từ giai đoạn); tick "Ép tất cả" = hành vi cũ.
+        ttk.Label(card_cfg, text="Chế độ mặc định:").grid(row=4, column=0, sticky="w", pady=(8, 0))
         self.var_phase_label = tk.StringVar(value=PHASE_LABELS[0])
         # v1.3.8: combobox + nút "CHI TIẾT" mở tài liệu 3 chế độ ngâm (thuần UI)
         phase_line = ttk.Frame(card_cfg)
@@ -1769,6 +1876,11 @@ class AutomationApp:
                                          style="Tool.TButton", width=8)
         self.btn_phase_info.pack(side="left", padx=(6, 0))
         self.cbo_phase.bind("<<ComboboxSelected>>", self._on_phase_changed)
+        self.var_force_phase = tk.BooleanVar(value=False)
+        self.chk_force_phase = ttk.Checkbutton(phase_line, text="Ép tất cả acc",
+                                               variable=self.var_force_phase,
+                                               command=self._on_phase_changed)
+        self.chk_force_phase.pack(side="left", padx=(8, 0))
         self.lbl_phase_hint = ttk.Label(card_cfg, text="", style="Muted.TLabel",
                                         wraplength=360, justify="left")
         self.lbl_phase_hint.grid(row=5, column=1, sticky="w", padx=(10, 0))
@@ -2203,12 +2315,35 @@ class AutomationApp:
                 and now - getattr(self, "_stage_cache_at", 0.0) < max_age):
             return cache
         try:
-            data = DatabaseHandler().get_stage_overview()
+            db = DatabaseHandler()
+            data = db.get_stage_overview()
         except Exception as e:
-            print(f"[!] Không đọc được bảng giai đoạn (bỏ qua): {e}")
-            data = {}
+            try:  # v1.9.2: giờ được gọi từ __init__ TRƯỚC khi lắp ThreadSafeStdout -> in phải an toàn cp1252
+                print(f"[!] Không đọc được bảng giai đoạn (bỏ qua): {e}")
+            except Exception:
+                pass
+            db, data = None, {}
         self._stage_cache = data
         self._stage_cache_at = now
+        # v1.9.2: đồng bộ sổ stage_history theo giai đoạn TÍNH TỪ NGÀY (trước đây chỉ worker ghi
+        # khi chạy bot -> acc đổi giai đoạn mà hôm đó không chạy thì không có mốc). log_stage_change
+        # tự dedup với dòng cuối; _stage_synced tránh gọi lại mỗi 5s.
+        if db is not None:
+            synced = getattr(self, "_stage_synced", None)
+            if synced is None:
+                synced = self._stage_synced = {}
+            for pid, info in (data or {}).items():
+                code = (info or {}).get("stage") or ""
+                if code and synced.get(pid) != code:
+                    try:
+                        db.log_stage_change(pid, code, source="auto", note="ui")
+                    except Exception:
+                        pass
+                    synced[pid] = code
+            try:
+                self._stage_changes = db.get_latest_stage_changes()
+            except Exception:
+                self._stage_changes = {}
         return data
 
     # ==========================================================
@@ -2509,7 +2644,7 @@ class AutomationApp:
     # Cột sort theo SỐ (raw trong self._stage_raw); còn lại sort theo chuỗi.
     STAGE_NUM_COLS = ("left",)
     STAGE_PHASE_SHORT = {"clean": "1 · Acc mới", "mail": "2 · Nuôi Google",
-                         "youtube": "3 · Cày YouTube"}
+                         "youtube": "3 · Cày YouTube", "channel": "4 · Ngâm kênh"}
     STAGE_FILTER_ALL = "Tất cả"
     STAGE_FILTER_NONE = "Chưa xác định"
 
@@ -2525,7 +2660,8 @@ class AutomationApp:
         "round": "Vòng",
     }
     ASSIGN_WIDTHS = {"name": 170, "id": 80, "group": 130, "google": 280, "yt": 220, "round": 56,
-                     "plan": 230}  # v1.8.4: "plan" chỉ có ở hộp xác nhận
+                     "plan": 230,  # v1.8.4: "plan" chỉ có ở hộp xác nhận
+                     "stage": 150, "mode": 150}  # v1.9.2: giai đoạn sheet -> chế độ chạy (chỉ hộp xác nhận)
     ASSIGN_NUM_COLS = ("round",)
 
     def _create_stage_tab(self):
@@ -2576,6 +2712,11 @@ class AutomationApp:
         self.chk_stage_warn.pack(side="right", padx=(8, 0))
         ttk.Button(bar, text="Tự điền từ dữ liệu cũ", width=20,
                    command=self.run_stage_backfill).pack(side="right", padx=(0, 8))
+        # v1.9.2: gộp "Mốc nuôi acc (7 ngày)" vào đây — checklist việc làm tay của sheet (dòng 3)
+        ttk.Button(bar, text="Việc làm tay (Giai đoạn 1)", width=24,
+                   command=self.show_stage1_tasks).pack(side="right", padx=(0, 8))
+        ttk.Button(bar, text="Đặt ngày hàng loạt (acc đã tick)", width=28,
+                   command=self.show_bulk_date_dialog).pack(side="right", padx=(0, 8))
 
         body = ttk.Frame(frame)
         body.pack(fill="both", expand=True, padx=10, pady=(4, 0))
@@ -2772,6 +2913,152 @@ class AutomationApp:
                 return p["name"]
         return (pid or "")[:8]
 
+    def show_stage1_tasks(self):
+        """v1.9.2: checklist việc làm tay khi acc sang Giai đoạn 1 (sheet 'Auto ngâm mail' dòng 3).
+        Thay cho dialog 'Mốc nuôi acc (7 ngày)' cũ — nay nằm trong tab GIAI ĐOẠN NGÂM."""
+        messagebox.showinfo(
+            "Giai đoạn 1 — việc làm tay",
+            f"Hết {STAGE0_DAYS} ngày Giai đoạn 0 (lắp proxy, chưa mail) là tới lượt LÀM TAY. "
+            "Bot không làm thay được phần này.\n\n" + STAGE1_TASKS_TEXT
+            + "\n\nSau khi login Gmail xong: double-click acc trong bảng -> đặt 'Ngày lắp mail' "
+            "để app đếm 7 ngày Hagrid (H1/7 → H7/7).",
+        )
+
+    def show_bulk_date_dialog(self):
+        """v1.9.2: đặt NGÀY BẮT ĐẦU (Giai đoạn 0) / NGÀY LẮP MAIL (Hagrid 7 ngày) cho MỌI acc đang tick
+        trong danh sách — thay vì double-click từng acc. Ô để trống = không đụng mốc đó.
+        Mặc định chỉ điền ô đang trống (không ghi đè mốc đã nhập tay)."""
+        pids = [r["id"] for r in self.profile_rows
+                if r["var"].get() and not r["firefox"] and not r.get("hidden", False)]
+        if not pids:
+            messagebox.showwarning(
+                "Chưa tick acc",
+                "Tick các tài khoản cần đặt ngày trong danh sách TÀI KHOẢN SẼ NGÂM trước "
+                "(nút 'Tick mục' trên header mục CHƯA ĐẶT NGÀY tick cả mục).",
+            )
+            return
+        old = getattr(self, "_bulk_date_win", None)
+        if old is not None and old.winfo_exists():
+            old.lift()
+            return
+        win = tk.Toplevel(self.root)
+        self._bulk_date_win = win
+        win.title(f"Đặt ngày hàng loạt — {len(pids)} acc đã tick")
+        win.configure(bg=self.C_CARD)
+        win.geometry("560x330")
+        try:
+            win.transient(self.root)
+            win.lift()
+        except Exception:
+            pass
+        today = datetime.date.today().isoformat()
+        ttk.Label(win, text=f"Áp cho {len(pids)} acc đang tick. Ô để trống = giữ nguyên mốc đó.",
+                  style="Accent.TLabel", padding=(12, 10, 12, 4)).pack(fill="x")
+        frm = ttk.Frame(win, padding=(12, 4))
+        frm.pack(fill="x")
+        frm.columnconfigure(1, weight=1)
+        var_start = tk.StringVar(value="")
+        var_mail = tk.StringVar(value="")
+        ttk.Label(frm, text="Ngày bắt đầu (Giai đoạn 0, lắp proxy):").grid(row=0, column=0, sticky="w", pady=4)
+        self._bulk_ent_start = ttk.Entry(frm, textvariable=var_start, width=14)
+        self._bulk_ent_start.grid(row=0, column=1, sticky="w", padx=(8, 4))
+        ttk.Button(frm, text="Hôm nay", width=9, command=lambda: var_start.set(today),
+                   style="Tool.TButton").grid(row=0, column=2)
+        ttk.Label(frm, text="Ngày lắp mail (login Gmail đầu — Hagrid 7 ngày):").grid(row=1, column=0, sticky="w", pady=4)
+        self._bulk_ent_mail = ttk.Entry(frm, textvariable=var_mail, width=14)
+        self._bulk_ent_mail.grid(row=1, column=1, sticky="w", padx=(8, 4))
+        ttk.Button(frm, text="Hôm nay", width=9, command=lambda: var_mail.set(today),
+                   style="Tool.TButton").grid(row=1, column=2)
+        ttk.Label(frm, text="Định dạng: 2026-11-19 · 19/11/2026 · 19-11-2026", style="Muted.TLabel").grid(
+            row=2, column=0, columnspan=3, sticky="w")
+        var_keep = tk.BooleanVar(value=True)
+        self._bulk_chk_keep = ttk.Checkbutton(frm, text="Chỉ điền ô đang trống (không ghi đè mốc đã có)",
+                                              variable=var_keep)
+        self._bulk_chk_keep.grid(row=3, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        ttk.Label(win, text=("Đặt ngày lắp mail là acc sang Giai đoạn 1 (H1/7) và chạy chế độ 2 · Nuôi Google; "
+                             "từ H5 → Ngâm kênh (3 · Cày YouTube). Chỉ đặt khi ĐÃ login Gmail thật trên acc đó."),
+                  style="Muted.TLabel", wraplength=520, justify="left", padding=(12, 6)).pack(fill="x")
+        lbl_res = ttk.Label(win, text="", style="Muted.TLabel", padding=(12, 2))
+        lbl_res.pack(fill="x")
+
+        def _apply():
+            s_raw, m_raw = var_start.get().strip(), var_mail.get().strip()
+            if not s_raw and not m_raw:
+                messagebox.showwarning("Chưa nhập ngày", "Nhập ít nhất 1 trong 2 ngày.", parent=win)
+                return
+            s_iso = self._parse_date_input(s_raw) if s_raw else ""
+            m_iso = self._parse_date_input(m_raw) if m_raw else ""
+            if (s_raw and not s_iso) or (m_raw and not m_iso):
+                messagebox.showerror("Ngày không hợp lệ", "Dùng dạng 2026-11-19 hoặc 19/11/2026.", parent=win)
+                return
+            db = DatabaseHandler()
+            try:
+                have = db.get_profile_stage_rows() or {}
+            except Exception:
+                have = {}
+            keep = bool(var_keep.get())
+            n_s = n_m = n_skip = 0
+            for pid in pids:
+                cur = have.get(pid) or {}
+                if s_iso:
+                    if keep and (cur.get("start_date") or ""):
+                        n_skip += 1
+                    elif db.set_profile_start_date(pid, s_iso):
+                        n_s += 1
+                if m_iso:
+                    if keep and (cur.get("mail_date") or ""):
+                        n_skip += 1
+                    elif db.set_profile_mail_date(pid, m_iso):
+                        n_m += 1
+            self._bulk_last = {"start": n_s, "mail": n_m, "skipped": n_skip}
+            self._stage_invalidate()
+            self._layout_groups()
+            self._update_prof_count()
+            self._filter_profiles()
+            msg = (f"Đã đặt ngày bắt đầu cho {n_s} acc, ngày lắp mail cho {n_m} acc"
+                   + (f", bỏ qua {n_skip} ô đã có mốc." if n_skip else "."))
+            lbl_res.config(text=msg)
+            print(f"[+] Đặt ngày hàng loạt: {msg}")
+
+        btns = ttk.Frame(win, padding=(12, 6, 12, 12))
+        btns.pack(side="bottom", fill="x")
+        ttk.Button(btns, text="Đóng", command=win.destroy).pack(side="right", padx=(8, 0))
+        self._bulk_btn_apply = ttk.Button(btns, text="Áp dụng", style="Start.TButton", command=_apply)
+        self._bulk_btn_apply.pack(side="right")
+
+    def resolve_profile_phases(self, profiles, default_phase=None, force=None):
+        """v1.9.2: chế độ chạy CHO TỪNG acc theo giai đoạn sheet:
+            ghim tay (phase_override) > suy từ giai đoạn (STAGE_SUGGESTED_PHASE) > combobox mặc định.
+        force=True -> mọi acc = combobox (hành vi cũ). Trả ({pid: phase}, {pid: nguồn}),
+        nguồn ∈ {'ghim', 'giai đoạn', 'mặc định', 'ép'}."""
+        if default_phase is None:
+            default_phase = PHASE_MAP.get(self.var_phase_label.get(), "clean")
+        if force is None:
+            try:
+                force = bool(self.var_force_phase.get())
+            except Exception:
+                force = False
+        phases, sources = {}, {}
+        if force:
+            for pid in profiles:
+                phases[pid] = default_phase
+                sources[pid] = "ép"
+            return phases, sources
+        try:
+            ov = self._stage_overview_cached() or {}
+        except Exception:
+            ov = {}
+        for pid in profiles:
+            info = ov.get(pid) or {}
+            eff = info.get("effective_phase") or ""
+            if info.get("phase_forced") and eff in VALID_PHASES:
+                phases[pid], sources[pid] = eff, "ghim"
+            elif info.get("stage") and eff in VALID_PHASES:
+                phases[pid], sources[pid] = eff, "giai đoạn"
+            else:
+                phases[pid], sources[pid] = default_phase, "mặc định"
+        return phases, sources
+
     def _stage_invalidate(self):
         """Xoá cache giai đoạn rồi làm mới cả tab GIAI ĐOẠN NGÂM lẫn cột "Giai đoạn" của bảng thời lượng."""
         self._stage_cache = None
@@ -2920,11 +3207,12 @@ class AutomationApp:
 
         def one(pid):
             th = amap.get(pid) or {}
-            key = (th.get("google_query", ""), tuple(th.get("related") or []))
+            ph = th.get("phase") or phase  # v1.9.2: pha riêng của acc (theo giai đoạn sheet)
+            key = (th.get("google_query", ""), tuple(th.get("related") or []), ph)
             try:
                 if key not in cache:
                     cache[key] = build_session_plan(th.get("google_query", ""), th.get("related"), name, lang,
-                                                    phase, skip_youtube)
+                                                    ph, skip_youtube)
                 plan, src = cache[key]
                 out[pid] = {"plan": plan, "src": src}
             except Exception as e:
@@ -3012,10 +3300,31 @@ class AutomationApp:
 
         body = ttk.Frame(win)
         body.pack(side="top", fill="both", expand=True, padx=12, pady=4)
-        cols = list(self.ASSIGN_COLUMNS) + ["plan"]
+        # v1.9.2: +2 cột "Giai đoạn" (sheet) và "Chế độ chạy" (theo acc) — chỉ ở hộp xác nhận
+        cols = list(self.ASSIGN_COLUMNS) + ["stage", "mode", "plan"]
+        _hdr_extra = {"stage": "Giai đoạn", "mode": "Chế độ chạy"}
+        _pmap = getattr(self, "_phase_by_pid", None) or {}
+        _psrc = getattr(self, "_phase_src", None) or {}
+        try:
+            _ov = self._stage_overview_cached() or {}
+        except Exception:
+            _ov = {}
+
+        def _stage_cell(pid):
+            si = _ov.get(pid) or {}
+            code = si.get("stage") or ""
+            if not code:
+                return self.NOSTAGE_LABEL
+            return f"{STAGE_SHEET_LABELS.get(code, code)} · {si.get('day_label') or ''}".strip(" ·")
+
+        def _mode_cell(pid):
+            ph = _pmap.get(pid) or PHASE_MAP.get(self.var_phase_label.get(), "clean")
+            src = _psrc.get(pid) or ""
+            return f"{self.STAGE_PHASE_SHORT.get(ph, ph)}" + (f" ({src})" if src else "")
+
         tree = ttk.Treeview(body, columns=cols, show="headings", selectmode="browse")
         for c in cols:
-            tree.heading(c, text=self.ASSIGN_HEADERS.get(c, c))
+            tree.heading(c, text=self.ASSIGN_HEADERS.get(c, _hdr_extra.get(c, c)))
             tree.column(
                 c,
                 width=self.ASSIGN_WIDTHS.get(c, 100),
@@ -3040,6 +3349,8 @@ class AutomationApp:
                         (r.get("google") or "")[:60],
                         (r.get("yt") or "")[:48],
                         r.get("round", ""),
+                        _stage_cell(pid),
+                        _mode_cell(pid),
                         "đang sinh…",
                     ),
                 )
@@ -3838,33 +4149,131 @@ class AutomationApp:
         self._update_prof_count()
         self._filter_profiles()
 
-    def _layout_groups(self):
-        """v1.3.6: tạo frame header cho mọi nhóm có trong profile_rows (pack sau này
-        theo thứ tự trong _filter_profiles — header + dòng cùng nhóm xen kẽ).
-        v1.3.7: header là dải nền nổi (C_CARD2) — tên nhóm accent + badge đếm,
-clearly tách nhóm hơn kiểu label trần + separator."""
+    # ---------------- v1.9.2: CHIA MỤC DANH SÁCH THEO GIAI ĐOẠN SHEET ----------------
+    # Mục = giai đoạn của sheet "Auto ngâm mail" (S0..S5 qua STAGE_SHEET_LABELS) hoặc nhóm GPM
+    # (hành vi v1.3.6). Acc tự "chuyển mục" khi compute_stage đổi theo ngày — không cần kéo tay.
+    PROF_GROUPBY_STAGE = "stage"
+    PROF_GROUPBY_GROUP = "group"
+    PROF_GROUPBY_LABELS = {"stage": "Giai đoạn", "group": "Nhóm GPM"}
+    NOSTAGE_LABEL = "Chưa đặt ngày"
+    STAGE1_SHORT_HINT = "Làm tay: login Gmail sạch · 2SV · email/SĐT khôi phục · Safe Browsing"
+
+    def _prof_groupby(self):
+        """'stage' | 'group' — đọc combobox 'Xếp theo', an toàn khi widget chưa có."""
+        try:
+            lbl = self.var_prof_groupby.get()
+        except Exception:
+            return self.PROF_GROUPBY_STAGE
+        for k, v in self.PROF_GROUPBY_LABELS.items():
+            if lbl == v or lbl == k:
+                return k
+        return self.PROF_GROUPBY_STAGE
+
+    def _row_section(self, r, stages=None):
+        """Khóa mục của 1 dòng: tên nhóm GPM (chế độ nhóm) hoặc mã giai đoạn S0..S5
+        ('' = chưa đặt ngày) theo cache giai đoạn."""
+        if self._prof_groupby() == self.PROF_GROUPBY_GROUP:
+            return r.get("group") or UNGROUPED_LABEL
+        if stages is None:
+            stages = self._stage_overview_cached()
+        si = (stages or {}).get(r.get("id")) or {}
+        return si.get("stage") or ""
+
+    def _section_title(self, key):
+        """(tiêu đề IN HOA, nhãn chế độ chạy) cho header mục."""
+        if self._prof_groupby() == self.PROF_GROUPBY_GROUP:
+            return key.upper(), ""
+        if not key:
+            return self.NOSTAGE_LABEL.upper(), "→ chế độ mặc định (combobox)"
+        title = f"{STAGE_SHEET_LABELS.get(key, key)} · {STAGE_NAMES.get(key, '')}".strip(" ·")
+        mode = self.STAGE_PHASE_SHORT.get(suggested_phase(key), "")
+        return title.upper(), f"→ {mode}" if mode else ""
+
+    def _on_groupby_changed(self, event=None):
+        """Đổi 'Xếp theo' -> dựng lại header + pack lại, nhớ vào config."""
+        self._layout_groups()
+        self._update_prof_count()
+        self._filter_profiles()
+        try:
+            self.save_current_config()
+        except Exception:
+            pass
+
+    def _set_section_profiles(self, key, value=True):
+        """Nút 'Tick mục' trên header: tick/bỏ các dòng ĐANG HIỆN của mục đó."""
+        stages = self._stage_overview_cached() if self._prof_groupby() == self.PROF_GROUPBY_STAGE else {}
         for r in self.profile_rows:
-            g = r["group"] or UNGROUPED_LABEL
-            if g in self._group_headers:
+            if r["firefox"] or r.get("hidden", False):
+                continue
+            if self._row_section(r, stages) == key:
+                r["var"].set(value)
+        self._update_prof_count()
+
+    def _layout_groups(self):
+        """v1.3.6: tạo frame header cho mọi mục có trong profile_rows (pack sau này
+        theo thứ tự trong _filter_profiles — header + dòng cùng mục xen kẽ).
+        v1.3.7: header là dải nền nổi (C_CARD2) — tên accent + badge đếm.
+        v1.9.2: mục theo GIAI ĐOẠN SHEET (mặc định) hoặc nhóm GPM; header giai đoạn có nhãn
+        chế độ chạy + nút 'Tick mục'; Giai đoạn 1 nhắc ngắn việc làm tay (sheet dòng 3)."""
+        for h in list(self._group_headers.values()):
+            try:
+                h["frame"].destroy()
+            except Exception:
+                pass
+        self._group_headers = {}
+        by_stage = self._prof_groupby() == self.PROF_GROUPBY_STAGE
+        stages = self._stage_overview_cached() if by_stage else {}
+        for r in self.profile_rows:
+            key = self._row_section(r, stages)
+            if key in self._group_headers:
                 continue
             hdr = tk.Frame(self.prof_inner, bg=self.C_CARD2)
-            tk.Label(hdr, text=g.upper(), fg=self.C_ACCENT, bg=self.C_CARD2,
+            title, mode = self._section_title(key)
+            line = tk.Frame(hdr, bg=self.C_CARD2)
+            line.pack(fill="x")
+            tk.Label(line, text=title, fg=self.C_ACCENT, bg=self.C_CARD2,
                      font=("Segoe UI", 9, "bold")).pack(side="left", padx=(8, 0), pady=4)
-            cnt = tk.Label(hdr, text="", fg=self.C_PILL_FG, bg=self.C_PILL_BG,
+            cnt = tk.Label(line, text="", fg=self.C_PILL_FG, bg=self.C_PILL_BG,
                            font=("Consolas", 9, "bold"), padx=6, pady=1)
             cnt.pack(side="left", padx=(8, 8))
-            self._group_headers[g] = {"group": g, "frame": hdr, "count": cnt}
+            if mode:
+                # dòng 2 của header: chế độ chạy (+ nhắc việc làm tay ở S1) — không chen với nút bên phải
+                sub = tk.Frame(hdr, bg=self.C_CARD2)
+                sub.pack(fill="x")
+                tk.Label(sub, text="chế độ chạy " + mode, fg=self.C_ACCENT_2, bg=self.C_CARD2,
+                         font=("Segoe UI", 8)).pack(side="left", padx=(8, 0), pady=(0, 3))
+            if by_stage:
+                tk.Button(line, text="Tick mục", command=lambda k=key: self._set_section_profiles(k, True),
+                          bg=self.C_BTN, fg=self.C_BTN_FG, activebackground=self.C_BTN_ACTIVE,
+                          activeforeground=self.C_BTN_FG, relief="flat", bd=0, cursor="hand2",
+                          font=("Segoe UI", 8), padx=8, pady=1).pack(side="right", padx=(0, 8))
+                if key == "S1":
+                    tk.Label(sub if mode else hdr, text="· " + self.STAGE1_SHORT_HINT, fg=self.C_MUTED,
+                             bg=self.C_CARD2, font=("Segoe UI", 8, "italic")).pack(side="left", padx=(6, 0), pady=(0, 3))
+                if key in ("", "S0"):
+                    # Chưa đặt ngày -> đặt ngày bắt đầu/lắp mail hàng loạt; S0 -> đặt ngày lắp mail khi đã login Gmail
+                    tk.Button(line, text="Đặt ngày…", command=self.show_bulk_date_dialog,
+                              bg=self.C_BTN, fg=self.C_BTN_FG, activebackground=self.C_BTN_ACTIVE,
+                              activeforeground=self.C_BTN_FG, relief="flat", bd=0, cursor="hand2",
+                              font=("Segoe UI", 8), padx=8, pady=1).pack(side="right", padx=(0, 4))
+            self._group_headers[key] = {"group": key, "frame": hdr, "count": cnt}
 
     def _groups_multi(self):
         """v1.3.6: True khi có >=2 nhóm và có ít nhất 1 nhóm thật (ngoài 'Chưa có nhóm').
-        Nguồn quyết định hiện combobox lọc + header nhóm — danh sách chưa phân nhóm
-        thì UI y hệt v1.2.x (bài học: không thêm chi tiết thừa khi chưa có dữ liệu)."""
+        Nguồn quyết định hiện combobox lọc nhóm + (chế độ nhóm) header — danh sách chưa phân
+        nhóm thì UI y hệt v1.2.x (bài học: không thêm chi tiết thừa khi chưa có dữ liệu)."""
         groups = []
         for r in self.profile_rows:
             g = r["group"] or UNGROUPED_LABEL
             if g not in groups:
                 groups.append(g)
         return len([g for g in groups if g != UNGROUPED_LABEL]) >= 1 and len(groups) >= 2
+
+    def _headers_visible(self):
+        """Header mục có hiện không: chế độ giai đoạn -> luôn (khi có dòng); chế độ nhóm -> _groups_multi."""
+        if self._prof_groupby() == self.PROF_GROUPBY_STAGE:
+            return bool(self.profile_rows)
+        return self._groups_multi()
 
     def _populate_group_filter(self):
         """Combobox lọc nhóm: hiện khi có >=2 nhóm thật (ngoài 'Chưa có nhóm'),
@@ -3887,9 +4296,18 @@ clearly tách nhóm hơn kiểu label trần + separator."""
             self._lbl_group_filter.pack_forget()
             self.var_prof_group.set(GROUP_ALL)
 
-    def _group_order(self):
-        """Thứ tự hiển thị nhóm: theo lần xuất hiện đầu trong profile_rows,
-        'Chưa có nhóm' luôn chót (API GPM trả profile đã gom theo nhóm)."""
+    def _group_order(self, stages=None):
+        """Thứ tự hiển thị mục. Chế độ nhóm: theo lần xuất hiện đầu trong profile_rows,
+        'Chưa có nhóm' luôn chót (API GPM trả profile đã gom theo nhóm).
+        v1.9.2 chế độ giai đoạn: S0 → S5 theo sheet, 'Chưa đặt ngày' chót."""
+        if self._prof_groupby() == self.PROF_GROUPBY_STAGE:
+            if stages is None:
+                stages = self._stage_overview_cached()
+            present = {self._row_section(r, stages) for r in self.profile_rows}
+            order = [c for c in STAGE_CODES if c in present]
+            if "" in present:
+                order.append("")
+            return order
         seen = []
         for r in self.profile_rows:
             g = r["group"] or UNGROUPED_LABEL
@@ -3900,6 +4318,41 @@ clearly tách nhóm hơn kiểu label trần + separator."""
             seen.append(UNGROUPED_LABEL)
         return seen
 
+    def _decorate_row(self, r, stages, changes, by_stage):
+        """v1.9.2: pill ngày (D2/4 · H3/7) + nhãn nhóm GPM trên dòng khi xếp theo giai đoạn;
+        acc VỪA đổi giai đoạn (lịch sử có ≥2 dòng, dòng cuối là hôm nay) tô accent + 'mới hôm nay'."""
+        pill = r.get("stage_lbl")
+        grp = r.get("group_lbl")
+        if pill is None or grp is None:
+            return
+        if not by_stage:
+            pill.pack_forget()
+            grp.pack_forget()
+            return
+        si = (stages or {}).get(r["id"]) or {}
+        code = si.get("stage") or ""
+        txt = si.get("day_label") or ("" if code else "chưa đặt ngày")
+        ch = (changes or {}).get(r["id"]) or {}
+        today = datetime.date.today().isoformat()
+        is_new = bool(code and ch.get("n_rows", 0) >= 2 and ch.get("stage") == code
+                      and str(ch.get("entered_at") or "")[:10] == today)
+        if is_new:
+            txt = (txt + " · mới hôm nay").strip(" ·")
+            pill.config(text=txt, fg="#ffffff", bg=self.C_ACCENT)
+        else:
+            pill.config(text=txt, fg=self.C_PILL_FG, bg=self.C_PILL_BG)
+        # pack side=right: packed TRƯỚC = nằm ngoài cùng bên phải -> ID | pill ngày | nhóm
+        if txt:
+            pill.pack(side="right", padx=(0, 2), after=r["id_lbl"])
+        else:
+            pill.pack_forget()
+        g = r.get("group") or ""
+        if g:
+            grp.config(text=g[:18])
+            grp.pack(side="right", padx=(0, 6), after=pill if txt else r["id_lbl"])
+        else:
+            grp.pack_forget()
+
     def _filter_profiles(self, event=None):
         """Ẩn/hiện dòng theo (1) nhóm đã chọn và (2) từ khóa lọc (tên/ID, không phân biệt
         hoa thường). Pack THEO THỨ TỰ NHÓM: header rồi các dòng của nhóm đó (xen kẽ đúng).
@@ -3907,23 +4360,30 @@ clearly tách nhóm hơn kiểu label trần + separator."""
         q = self.var_prof_filter.get().strip().lower()
         sel_group = self.var_prof_group.get() if self.cbo_prof_group.winfo_ismapped() else GROUP_ALL
         visible = 0
-        multi = self._groups_multi()
-        # 1) tính ẩn/hiện từng dòng
+        multi = self._headers_visible()
+        by_stage = self._prof_groupby() == self.PROF_GROUPBY_STAGE
+        stages = self._stage_overview_cached() if by_stage else {}
+        changes = getattr(self, "_stage_changes", None) or {}
+        # v1.9.2: header phải khớp bộ mục hiện tại (giai đoạn đổi theo ngày / đổi "Xếp theo")
+        need = {self._row_section(r, stages) for r in self.profile_rows}
+        if need - set(self._group_headers.keys()):
+            self._layout_groups()
+        # 1) tính ẩn/hiện từng dòng (lọc nhóm GPM áp dụng ở CẢ 2 cách xếp)
         for r in self.profile_rows:
             hay = (r["name"] + " " + r["id"]).lower()
             g = r["group"] or UNGROUPED_LABEL
             ok_group = (sel_group == GROUP_ALL) or (sel_group == g)
             r["hidden"] = bool((q and q not in hay) or (not ok_group))
-        # 2) QUÊN hết pack cũ rồi pack lại theo nhóm. BÀI HỌC v1.3.6: gọi pack() lại trên
+        # 2) QUÊN hết pack cũ rồi pack lại theo mục. BÀI HỌC v1.3.6: gọi pack() lại trên
         # widget ĐÃ pack KHÔNG đổi thứ tự (Tk giữ vị trí cũ) -> header rớt xuống đáy canvas,
         # ngoài vùng nhìn. Phải pack_forget trước rồi mới pack theo thứ tự mong muốn.
         for h in self._group_headers.values():
             h["frame"].pack_forget()
         for r in self.profile_rows:
             r["frame"].pack_forget()
-        # 3) pack theo nhóm: header rồi các dòng chưa ẩn của nhóm đó (xen kẽ đúng)
-        for g in self._group_order():
-            rows_g = [r for r in self.profile_rows if (r["group"] or UNGROUPED_LABEL) == g]
+        # 3) pack theo mục: header rồi các dòng chưa ẩn của mục đó (xen kẽ đúng)
+        for g in self._group_order(stages):
+            rows_g = [r for r in self.profile_rows if self._row_section(r, stages) == g]
             shown = [r for r in rows_g if not r["hidden"]]
             h = self._group_headers.get(g)
             nsel = sum(1 for r in rows_g if r["var"].get())
@@ -3932,6 +4392,7 @@ clearly tách nhóm hơn kiểu label trần + separator."""
                 if shown and multi:
                     h["frame"].pack(fill="x", anchor="w", padx=2, pady=(5, 2))
             for r in shown:
+                self._decorate_row(r, stages, changes, by_stage)
                 r["frame"].pack(fill="x", anchor="w", padx=2, pady=1)
             visible += len(shown)
         # Placeholder hướng dẫn khi chưa có dòng nào hiển thị (danh sách trống / lọc không khớp)
@@ -3968,20 +4429,28 @@ clearly tách nhóm hơn kiểu label trần + separator."""
             row.bind("<Enter>", lambda e: cb.config(style="RowHover.TCheckbutton"), add="+")
             row.bind("<Leave>", lambda e: cb.config(style="Row.TCheckbutton"), add="+")
         # v1.3.7: ID dạng pill Consolas gọn mắt, dễ phân biệt 2 acc trùng tên
-        tk.Label(row, text=pid[:8], fg=self.C_PILL_FG, bg=self.C_PILL_BG,
-                 font=("Consolas", 8), padx=5, pady=1).pack(side="right", padx=6)
+        id_lbl = tk.Label(row, text=pid[:8], fg=self.C_PILL_FG, bg=self.C_PILL_BG,
+                          font=("Consolas", 8), padx=5, pady=1)
+        id_lbl.pack(side="right", padx=6)
+        # v1.9.2: pill ngày giai đoạn (D2/4 · H3/7) + nhãn nhóm GPM — chỉ pack khi xếp theo giai đoạn
+        stage_lbl = tk.Label(row, text="", fg=self.C_PILL_FG, bg=self.C_PILL_BG,
+                             font=("Consolas", 8), padx=5, pady=1)
+        group_lbl = tk.Label(row, text="", fg=self.C_MUTED, bg=self.C_CARD,
+                             font=("Segoe UI", 8))
         self.profile_rows.append({"id": pid, "name": name, "firefox": firefox,
                                   "var": var, "frame": row, "group": group,
-                                  "hidden": False})
+                                  "hidden": False, "id_lbl": id_lbl,
+                                  "stage_lbl": stage_lbl, "group_lbl": group_lbl})
 
     def _update_prof_count(self):
         """Tổng số chọn + cập nhật header từng nhóm + giữ nguyên placeholder/lọc."""
         n_sel = sum(1 for r in self.profile_rows if r["var"].get())
         self.lbl_prof_count.config(text=f"{n_sel}/{len(self.profile_rows)} chọn")
+        stages = self._stage_overview_cached() if self._prof_groupby() == self.PROF_GROUPBY_STAGE else {}
         for gname, h in self._group_headers.items():
-            total = sum(1 for r in self.profile_rows if (r["group"] or UNGROUPED_LABEL) == gname)
+            total = sum(1 for r in self.profile_rows if self._row_section(r, stages) == gname)
             nsel = sum(1 for r in self.profile_rows
-                       if (r["group"] or UNGROUPED_LABEL) == gname and r["var"].get())
+                       if self._row_section(r, stages) == gname and r["var"].get())
             h["count"].config(text=f"{nsel}/{total}")
 
     def _set_all_profiles(self, value):
@@ -4187,7 +4656,15 @@ clearly tách nhóm hơn kiểu label trần + separator."""
             self.var_brain_type.set(cfg["brain_type"])
             self._on_brain_type_changed()
         self.var_phase_label.set(PHASE_LABEL_BY_KEY.get(cfg.get("phase", "clean"), PHASE_LABELS[0]))
+        self.var_force_phase.set(bool(cfg.get("force_phase", False)))  # v1.9.2
         self._on_phase_changed()
+        # v1.9.2: cách chia mục danh sách (giai đoạn | nhóm GPM)
+        _gb = cfg.get("prof_group_by") or self.PROF_GROUPBY_STAGE
+        self.var_prof_groupby.set(self.PROF_GROUPBY_LABELS.get(_gb, self.PROF_GROUPBY_LABELS["stage"]))
+        if _gb != self.PROF_GROUPBY_STAGE:
+            self._layout_groups()
+            self._update_prof_count()
+            self._filter_profiles()
         try:
             self.spin_threads.set(int(cfg.get("threads", 4)))
         except (ValueError, TypeError):
@@ -4311,6 +4788,8 @@ clearly tách nhóm hơn kiểu label trần + separator."""
         cfg["api_port"] = self.var_api_port.get()
         cfg["brain_type"] = self.var_brain_type.get()
         cfg["phase"] = PHASE_MAP.get(self.var_phase_label.get(), "clean")
+        cfg["force_phase"] = bool(self.var_force_phase.get())  # v1.9.2
+        cfg["prof_group_by"] = self._prof_groupby()            # v1.9.2
         try:
             cfg["threads"] = int(self.spin_threads.get())
         except (ValueError, TypeError):
@@ -4400,8 +4879,21 @@ clearly tách nhóm hơn kiểu label trần + separator."""
                                    else "CÓ xem (trang chủ + tìm kiếm)."))
         elif label.startswith("2"):
             hint = "YouTube: KHÔNG. Pha 2 ở hệ Google (Alerts/News/Wikipedia/TikTok/Reddit) - tập dượt Alerts."
+        elif label.startswith("4"):
+            hint = ("NGÂM KÊNH: phiên 45-60 phút trở lên (tính theo độ dài video đối thủ), 5 bước theo SOP — chỉ xem video đúng niche. "
+                    "Nhập niche ở nút 'Niche ngâm kênh'. Like/Sub rất thưa, không viết bình luận.")
         else:
             hint = "YouTube: CÓ - trục chính, được Sub (quota 1/ngày/profile). Cảnh: tài khoản phải đã nuôi Pha 1-2."
+        # v1.9.2: nói rõ phạm vi áp dụng của combobox
+        try:
+            forced = bool(self.var_force_phase.get())
+        except Exception:
+            forced = False
+        if forced:
+            hint += "\nÉP: mọi acc đã tick chạy chế độ này, bỏ qua giai đoạn sheet."
+        else:
+            hint += ("\nChỉ áp cho acc CHƯA đặt ngày. Acc đã đặt ngày chạy theo giai đoạn sheet "
+                     "(G.đoạn 0 → 1 Acc mới · G.đoạn 1-3 → 2 Nuôi Google · Ngâm kênh/G.đoạn 4 → 3 Cày YouTube).")
         self.lbl_phase_hint.config(text=hint)
 
     def show_phase_details(self):
@@ -4410,13 +4902,13 @@ clearly tách nhóm hơn kiểu label trần + separator."""
         action_map warmup.py, không import runtime). Tab mở sẵn ở pha đang chọn."""
         phase = PHASE_MAP.get(self.var_phase_label.get(), "clean")
         win = tk.Toplevel(self.root)
-        win.title("Chi tiết 3 chế độ ngâm")
+        win.title("Chi tiết các chế độ ngâm")
         win.configure(bg=self.C_BG)
         win.geometry("880x620")
 
         nb = ttk.Notebook(win)
         nb.pack(fill="both", expand=True, padx=10, pady=(10, 4))
-        for key in ("clean", "mail", "youtube"):
+        for key in ("clean", "mail", "youtube", "channel"):
             info = PHASE_DETAILS[key]
             frame = tk.Frame(nb, bg=self.C_CARD)
             nb.add(frame, text=PHASE_LABEL_BY_KEY[key])
@@ -4453,7 +4945,7 @@ clearly tách nhóm hơn kiểu label trần + separator."""
                      fg=self.C_MUTED, font=("Segoe UI", 9, "italic"),
                      anchor="w", justify="left", wraplength=810).pack(fill="x", pady=(8, 0))
         # nb.add() trả None trên Tk build này -> select theo index (thứ tự loop cố định)
-        nb.select({"clean": 0, "mail": 1, "youtube": 2}.get(phase, 0))
+        nb.select({"clean": 0, "mail": 1, "youtube": 2, "channel": 3}.get(phase, 0))
         ttk.Button(win, text="Đóng", command=win.destroy).pack(pady=(0, 10))
 
     def request_stop_all(self):
@@ -5131,8 +5623,8 @@ clearly tách nhóm hơn kiểu label trần + separator."""
              "— Giai đoạn 3 theo quy trình của bạn). ĐẾN LÚC LÀM TAY:\n\n"
              + "\n".join(lines)
              + "\n\n" + STAGE1_TASKS_TEXT
-             + "\n\nPopup này chỉ nhắc 1 lần/tài khoản. Xem lại mọi lúc bằng nút "
-             "'MỐC NUÔI ACC (7 NGÀY)'."),
+             + "\n\nPopup này chỉ nhắc 1 lần/tài khoản. Xem lại mọi lúc ở tab "
+             "'GIAI ĐOẠN NGÂM' (nút 'Việc làm tay (Giai đoạn 1)')."),
         )
 
     def export_activity_csv(self):
@@ -5223,37 +5715,36 @@ clearly tách nhóm hơn kiểu label trần + separator."""
             )
             return
 
-        # v1.5.0: cảnh báo LỆCH "Chế độ ngâm" so với giai đoạn thật của từng acc.
-        # Chỉ cảnh báo + đề xuất — KHÔNG tự đổi lựa chọn của người dùng (quyết định v1.5.0).
+        # v1.9.2: CHẾ ĐỘ CHẠY THEO TỪNG ACC (thay hộp cảnh báo lệch pha v1.5.0 — không còn gì để
+        # lệch): ghim tay > suy từ giai đoạn sheet > combobox mặc định; tick "Ép tất cả" = combobox.
         _phase_sel = PHASE_MAP.get(self.var_phase_label.get(), "clean")
         try:
-            _ov = self._stage_overview_cached() or {}
-            _sel = set(profiles)
-            _mismatch = [
-                (pid, info) for pid, info in _ov.items()
-                if pid in _sel and (info.get("effective_phase") or "") != _phase_sel
-            ]
-        except Exception:
-            _mismatch = []
-        if _mismatch:
-            _lines = []
-            for _pid, _info in _mismatch[:10]:
-                _sug = _info.get("effective_phase") or ""
-                _lines.append(
-                    f"• {self._profile_name_of(_pid)} ({_pid[:8]}): "
-                    f"{_info.get('stage') or '?'} — đề xuất "
-                    f"{self.STAGE_PHASE_SHORT.get(_sug, _sug or '?')}"
-                )
-            if len(_mismatch) > 10:
-                _lines.append(f"… và {len(_mismatch) - 10} acc khác")
-            if not messagebox.askyesno(
-                "Lệch chế độ ngâm",
-                f"Bạn chọn chế độ ngâm:\n  {PHASE_LABEL_BY_KEY.get(_phase_sel, _phase_sel)}\n\n"
-                f"{len(_mismatch)}/{len(profiles)} acc đang ở giai đoạn KHÁC chế độ này:\n\n"
-                + "\n".join(_lines)
-                + "\n\nVẫn chạy với chế độ đã chọn?  (chọn No để quay lại chỉnh)",
-            ):
-                return
+            self._stage_cache_at = 0.0  # đọc giai đoạn MỚI NHẤT ngay trước khi chạy
+            _phase_by_pid, _phase_src = self.resolve_profile_phases(profiles, _phase_sel)
+        except Exception as _e:
+            print(f"[!] Không tính được chế độ theo giai đoạn ({_e}) — dùng chế độ mặc định cho mọi acc.")
+            _phase_by_pid = {p: _phase_sel for p in profiles}
+            _phase_src = {p: "mặc định" for p in profiles}
+        self._phase_by_pid = _phase_by_pid
+        self._phase_src = _phase_src
+        # v1.9.3: chốt niche cho từng acc chạy chế độ 4 (ngâm kênh) NGAY lúc bấm Start
+        try:
+            self._niche_by_pid = self.resolve_profile_niches(
+                [p for p in profiles if _phase_by_pid.get(p) == "channel"])
+        except Exception as _e:
+            print(f"[!] Không chọn được niche ngâm kênh ({_e}) — acc chế độ 4 tạm dùng từ khóa của phiên.")
+            self._niche_by_pid = {}
+        NICHE_BY_PID.clear()
+        NICHE_BY_PID.update(self._niche_by_pid)
+        _cnt = {}
+        for _p in profiles:
+            _cnt[_phase_by_pid[_p]] = _cnt.get(_phase_by_pid[_p], 0) + 1
+        _n_default = sum(1 for _p in profiles if _phase_src.get(_p) == "mặc định")
+        _n_forced = sum(1 for _p in profiles if _phase_src.get(_p) == "ép")
+        print("[System] Chế độ chạy theo giai đoạn: "
+              + " · ".join(f"{self.STAGE_PHASE_SHORT.get(k, k)} {v} acc" for k, v in _cnt.items())
+              + (f" (ÉP tất cả theo combobox)" if _n_forced else
+                 f" (mặc định '{self.STAGE_PHASE_SHORT.get(_phase_sel, _phase_sel)}' cho {_n_default} acc chưa đặt ngày)"))
 
         # ── v1.5.7/v1.7.0 — PHÂN BỔ CHỦ ĐỀ CHO TỪNG PROFILE (trước khi mở thread) ──────
         # v1.7.0: ô 'Chủ đề gốc' nay NHIỀU DÒNG. Có chữ ở đó -> dùng CHÍNH các dòng này làm
@@ -5296,9 +5787,13 @@ clearly tách nhóm hơn kiểu label trần + separator."""
         # hiện dần; bấm CHẠY thì phiên dùng ĐÚNG kế hoạch đã hiện.
         self._plan_preview = {}
         self._plan_brain = None
+        # v1.9.2: kế hoạch sinh theo CHẾ ĐỘ RIÊNG của từng acc (bản sao có khóa "phase", KHÔNG
+        # chạm assignment_map dùng cho worker)
+        _amap_plan = {p: dict(th or {}, phase=_phase_by_pid.get(p, _phase_sel))
+                      for p, th in assignment_map.items()}
         threading.Thread(target=self._prepare_plans,
-                         args=(dict(assignment_map), self.var_brain_type.get(), self._keyword_lang(),
-                               self._plan_preview, PHASE_MAP.get(self.var_phase_label.get(), "clean"),
+                         args=(_amap_plan, self.var_brain_type.get(), self._keyword_lang(),
+                               self._plan_preview, _phase_sel,
                                bool(self.var_skip_youtube.get())),
                          daemon=True).start()
         if not self.show_assignment_confirm(assign_rows, pinned=pinned_flag):
@@ -6097,6 +6592,1681 @@ clearly tách nhóm hơn kiểu label trần + separator."""
         win.bind("<Escape>", lambda _e: win.destroy())
         (name_en if is_new else val_en).focus_set()
 
+    # ------------------------------------------------------------------ v1.9.1: HỎI ĐÁP AI (CHỈ ĐỌC)
+    QA_SAMPLES = ("Hôm nay profile nào lỗi, vì sao?", "Acc nào sắp tới ngày lắp mail?",
+                  "Proxy nào đang gánh quá 5 acc?")
+    QA_DEADLINE_S = 100       # quá mốc này thì thôi chờ AI (dò AI sống + 1 lượt hỏi 60s)
+    QA_PROXY_TTL_S = 300      # dùng lại danh sách proxy đã đọc từ GPM trong 5 phút
+
+    # ==========================================
+    # v1.9.3: NICHE cho chế độ 4 "Ngâm kênh" — lưu trong app_config["niches"]
+    # ==========================================
+    def resolve_profile_niches(self, profiles):
+        """{pid: niche dict} cho các acc sẽ chạy chế độ 4. Thứ tự chọn (channel_mode.pick_niche):
+        tên niche ghi riêng cho acc (cột niche ở bảng Giai đoạn) > niche có nhóm trùng nhóm GPM > niche mọi nhóm."""
+        out = {}
+        if not profiles:
+            return out
+        niches = list(self.cfg.get("niches") or [])
+        groups = {r["id"]: (r.get("group") or "") for r in self.profile_rows}
+        try:
+            meta = DatabaseHandler().get_profile_stage_rows() or {}
+        except Exception:
+            meta = {}
+        missing = 0
+        for pid in profiles:
+            n = channel_mode.pick_niche(niches, groups.get(pid, ""), (meta.get(pid) or {}).get("niche", ""))
+            if n:
+                out[pid] = n
+            else:
+                missing += 1
+        names = sorted({n.get("name", "") for n in out.values()})
+        print(f"[System] Ngâm kênh: {len(out)} acc có niche ({', '.join(names) or '-'})"
+              + (f" · {missing} acc CHƯA có niche (tạm dùng từ khóa của phiên)" if missing else ""))
+        return out
+
+    def open_niche_manager(self):
+        """Cửa sổ nhập niche: tên, mô tả, từ khóa đuôi dài, kênh đối thủ, từ loại trừ, nhóm áp dụng."""
+        if getattr(self, "_niche_dialog", None) is not None:
+            try:
+                if self._niche_dialog.winfo_exists():
+                    self._niche_dialog.lift()
+                    return
+            except Exception:
+                pass
+            self._niche_dialog = None
+        try:
+            self._open_niche_dialog()
+        except Exception as e:
+            self._niche_dialog = None
+            print(f"[!] Không mở được cửa sổ Niche: {e}")
+
+    def _open_niche_dialog(self):
+        win = tk.Toplevel(self.root)
+        self._niche_dialog = win
+        win.title("Niche ngâm kênh — từ khóa + kênh đối thủ")
+        win.configure(bg=self.C_CARD)
+        # v1.9.9: màn hình phóng 150% chỉ còn ~1280x720 điểm -> cửa sổ phải vừa (trừ thanh tác vụ + thanh tiêu đề) và
+        # đặt sát trên, nếu không hàng nút/ô nhập bị co hoặc tụt xuống dưới thanh tác vụ.
+        try:
+            _sw, _sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+            _w = min(1000, max(820, _sw - 60))
+            _h = min(820, max(560, _sh - 90))
+            win.geometry(f"{_w}x{_h}+{max(0, (_sw - _w) // 2)}+{max(0, (_sh - _h - 80) // 2)}")
+        except Exception:
+            win.geometry("980x640")
+        win.minsize(820, 560)
+        win.transient(self.root)
+        win.protocol("WM_DELETE_WINDOW",
+                     lambda: (setattr(self, "_niche_dialog", None), win.destroy()))
+
+        niches = [dict(n) for n in (self.cfg.get("niches") or []) if isinstance(n, dict)]
+        state = {"idx": None}
+
+        top = tk.Frame(win, bg=self.C_CARD, padx=14, pady=10)
+        top.pack(fill="x")
+        tk.Label(top, text="Niche ngâm kênh (chế độ 4)", bg=self.C_CARD, fg=self.C_ACCENT,
+                 font=("Segoe UI", 11, "bold")).pack(anchor="w")
+        tk.Label(top, bg=self.C_CARD, fg=self.C_MUTED, justify="left", font=("Segoe UI", 9), wraplength=860,
+                 text=("Mỗi niche là 'giáo trình' cho phiên ngâm (SOP Ngày 0): 15–20 từ khóa đuôi dài + 5–10 kênh đối thủ. "
+                       "Bot chỉ xem video khớp từ khóa hoặc thuộc kênh đối thủ. Acc nhận niche theo NHÓM GPM "
+                       "(để trống nhóm = áp cho mọi acc chạy chế độ 4).")).pack(anchor="w", pady=(2, 0))
+
+        # v1.9.4: `body` (giãn nở) được pack SAU CÙNG — hàng nút/status/khung key ghim đáy trước, nếu không khi
+        # cửa sổ thấp hàng nút bị đẩy ra ngoài (bài học v1.6.9).
+        body = tk.Frame(win, bg=self.C_CARD, padx=14)
+        left = tk.Frame(body, bg=self.C_CARD)
+        left.pack(side="left", fill="y", padx=(0, 12))
+        tk.Label(left, text="Danh sách niche", bg=self.C_CARD, fg=self.C_FG,
+                 font=("Segoe UI", 9, "bold")).pack(anchor="w")
+        lst = tk.Listbox(left, width=24, height=18, exportselection=False, bg=self.C_FIELD, fg=self.C_FG,
+                         selectbackground=self.C_SEL, selectforeground=self.C_SEL_FG,
+                         highlightthickness=1, highlightbackground=self.C_BORDER, relief="flat")
+        lst.pack(fill="y", expand=True, pady=(4, 6))
+        lbtn = tk.Frame(left, bg=self.C_CARD)
+        lbtn.pack(fill="x")
+        btn_new = ttk.Button(lbtn, text="+ Niche mới", style="Tool.TButton")
+        btn_new.pack(side="left")
+        btn_del = ttk.Button(lbtn, text="Xóa", style="Tool.TButton")
+        btn_del.pack(side="left", padx=(6, 0))
+
+        form = tk.Frame(body, bg=self.C_CARD)
+        form.pack(side="left", fill="both", expand=True)
+        form.columnconfigure(1, weight=1)
+
+        def _lbl(row, text, hint=""):
+            tk.Label(form, text=text, bg=self.C_CARD, fg=self.C_FG, font=("Segoe UI", 9, "bold"),
+                     anchor="nw", justify="left").grid(row=row, column=0, sticky="nw", pady=(6, 0))
+            if hint:
+                tk.Label(form, text=hint, bg=self.C_CARD, fg=self.C_MUTED, font=("Segoe UI", 8, "italic"),
+                         anchor="w", justify="left", wraplength=640).grid(row=row + 1, column=1, sticky="w", padx=(8, 0))
+
+        def _entry(row, var):
+            en = ttk.Entry(form, textvariable=var)
+            en.grid(row=row, column=1, sticky="we", padx=(8, 0), pady=(6, 0))
+            return en
+
+        var_name, var_desc = tk.StringVar(), tk.StringVar()
+        var_neg, var_groups = tk.StringVar(), tk.StringVar()
+        var_sync = tk.BooleanVar(value=True)
+        var_vmin = tk.StringVar()
+        _lbl(0, "Tên niche")
+        ent_name = _entry(0, var_name)
+        _lbl(1, "Mô tả 1–2 câu", "Ví dụ: Deep-sea exploration documentaries for a US audience.")
+        _entry(1, var_desc)
+
+        # v1.9.9: 2 ô NHIỀU DÒNG đặt cạnh nhau, nhận toàn bộ phần giãn nở + cao tối thiểu 150 điểm. Bản trước xếp dọc,
+        # trên màn hình phóng 150% mỗi ô co còn 1 dòng -> trông như ô 1 dòng, không biết nhập 15–20 từ khóa vào đâu.
+        boxes = tk.Frame(form, bg=self.C_CARD)
+        boxes.grid(row=3, column=0, columnspan=2, sticky="nsew", pady=(10, 0))
+        boxes.columnconfigure(0, weight=3, uniform="nichebox")
+        boxes.columnconfigure(1, weight=2, uniform="nichebox")
+        boxes.rowconfigure(0, weight=1)
+
+        def _box(col, title, hint):
+            fr = tk.Frame(boxes, bg=self.C_CARD)
+            fr.grid(row=0, column=col, sticky="nsew", padx=(0 if col == 0 else 12, 0))
+            tk.Label(fr, text=title, bg=self.C_CARD, fg=self.C_FG, font=("Segoe UI", 9, "bold"), anchor="w").pack(fill="x")
+            tk.Label(fr, text=hint, bg=self.C_CARD, fg=self.C_MUTED, font=("Segoe UI", 8, "italic"), anchor="w",
+                     justify="left").pack(fill="x")
+            wrap = tk.Frame(fr, bg=self.C_CARD)
+            wrap.pack(fill="both", expand=True, pady=(4, 0))
+            sbv = ttk.Scrollbar(wrap, orient="vertical")
+            sbv.pack(side="right", fill="y")
+            t = tk.Text(wrap, height=8, width=20, wrap="none", bg=self.C_FIELD, fg=self.C_FG,
+                        insertbackground=self.C_FG, relief="flat", highlightthickness=1,
+                        highlightbackground=self.C_BORDER, highlightcolor=self.C_ACCENT, font=("Consolas", 9), undo=True,
+                        yscrollcommand=sbv.set)
+            t.pack(side="left", fill="both", expand=True)
+            sbv.config(command=t.yview)
+            return t
+
+        txt_kw = _box(0, "Từ khóa đuôi dài — MỖI DÒNG 1 TỪ KHÓA", "Tiếng Anh, 15–20 dòng. Bot gõ nguyên văn vào Google/YouTube.")
+        txt_ch = _box(1, "Kênh đối thủ — mỗi dòng 1 kênh", "Link kênh hoặc @handle, 5–10 kênh.")
+        form.rowconfigure(3, weight=1, minsize=150)
+
+        _lbl(5, "Từ loại trừ", "Ngăn bằng dấu ; — tiêu đề chứa từ này bị coi là lạc niche (vd: kids; reaction; minecraft).")
+        _entry(5, var_neg)
+        known_groups = sorted({(r.get("group") or "").strip() for r in self.profile_rows if (r.get("group") or "").strip()})
+        _lbl(7, "Nhóm GPM áp dụng", "Ngăn bằng dấu ; — để trống = mọi acc chạy chế độ 4. Nhóm đang có: "
+             + ("; ".join(known_groups) if known_groups else "(chưa tải danh sách profile)"))
+        _entry(7, var_groups)
+        _lbl(9, "Video đối thủ dài")
+        vrow = tk.Frame(form, bg=self.C_CARD)
+        vrow.grid(row=9, column=1, sticky="we", padx=(8, 0), pady=(6, 0))
+        ttk.Entry(vrow, textvariable=var_vmin, width=7).pack(side="left")
+        tk.Label(vrow, text="phút (vd: 20) — phiên ngâm dài/ngắn theo số này. Để trống = lấy từ 'Học niche' hoặc bot tự đo.",
+                 bg=self.C_CARD, fg=self.C_MUTED, font=("Segoe UI", 8, "italic"), anchor="w").pack(side="left", padx=(8, 0))
+        chk = ttk.Checkbutton(form, variable=var_sync,
+                              text="Đầu phiên tự đưa YouTube về United States + English (SOP bắt buộc)")
+        chk.grid(row=10, column=1, sticky="w", padx=(8, 0), pady=(6, 0))
+
+        # Hàng nút đáy + nhãn "AI phân tích" tạo SỚM (trước dải key và `status`): test + _remap dựa vào quy ước
+        # "tk.Label cuối = status, áp cuối = dòng tóm tắt key".
+        bar = tk.Frame(win, bg=self.C_CARD, padx=14, pady=10)
+        # v1.12.0: dải "AI phân tích" riêng (cùng kiểu dải YouTube API key): ô chọn AI + tình trạng 2 tài khoản đăng nhập
+        # + nút "Tài khoản AI…". Nhãn tạo ở đây (trước lbl_key/status) để giữ quy ước thứ tự tk.Label ở trên.
+        ai_fr = tk.Frame(win, bg=self.C_CARD2, padx=10, pady=8)
+        lbl_ai = tk.Label(ai_fr, text="AI phân tích", bg=self.C_CARD2, fg=self.C_FG, font=("Segoe UI", 9, "bold"))
+        btn_acc = ttk.Button(ai_fr, text="Tài khoản AI…", style="Tool.TButton")
+        lbl_acc = tk.Label(ai_fr, text="", bg=self.C_CARD2, fg=self.C_MUTED, font=("Segoe UI", 9), anchor="w",
+                           justify="left", wraplength=400)
+        # v1.9.8: dải YouTube API key = tóm tắt kho key + nút mở cửa sổ "Quản lý YouTube API key" (thêm hàng trăm key,
+        # kiểm tra hàng loạt, gỡ key hỏng). Tạo TRƯỚC `status` để status vẫn là tk.Label cuối của cửa sổ.
+        api_fr = tk.Frame(win, bg=self.C_CARD2, padx=10, pady=8)
+        tk.Label(api_fr, text="YouTube API key", bg=self.C_CARD2, fg=self.C_FG,
+                 font=("Segoe UI", 9, "bold")).pack(side="left")
+        btn_key_mgr = ttk.Button(api_fr, text="Quản lý key…", style="Tool.TButton")
+        btn_key_mgr.pack(side="right")
+        lbl_key = tk.Label(api_fr, text="", bg=self.C_CARD2, fg=self.C_MUTED, font=("Segoe UI", 9),
+                           anchor="w", justify="left", wraplength=640)
+        lbl_key.pack(side="left", fill="x", expand=True, padx=(10, 8))
+
+        status = tk.Label(win, text="", bg=self.C_CARD, fg=self.C_MUTED, font=("Segoe UI", 10), anchor="w",
+                          justify="left", wraplength=940)
+        bar.pack(side="bottom", fill="x")
+        status.pack(side="bottom", fill="x", padx=14, pady=(8, 0))
+        ai_fr.pack(side="bottom", fill="x", padx=14, pady=(6, 0))
+        api_fr.pack(side="bottom", fill="x", padx=14, pady=(10, 0))
+        body.pack(side="top", fill="both", expand=True)
+        btn_save = ttk.Button(bar, text="Lưu niche", style="Start.TButton")
+        btn_save.pack(side="left")
+        btn_learn = ttk.Button(bar, text="Học niche từ kênh đối thủ", style="Tool.TButton")
+        btn_learn.pack(side="left", padx=(10, 0))
+        btn_learn_view = ttk.Button(bar, text="Xem kết quả học", style="Tool.TButton")
+        btn_learn_view.pack(side="left", padx=(6, 0))
+        btn_dialog = ttk.Button(bar, text="Xem đối thoại 2 AI", style="Tool.TButton")     # v1.12.1
+        btn_dialog.pack(side="left", padx=(6, 0))
+        # v1.16.0: 2 AI TRANH LUẬN TỚI CÙNG theo 4 chủ đề (đánh giá niche / đặc điểm / gói SEO / thumbnail): mỗi chủ đề nói
+        # tới khi CẢ HAI báo "đã chốt". Ô này = số vòng TỐI ĐA mỗi chủ đề (chốt chặn để không cãi vô hạn). 0 = chỉ đọc chéo.
+        tk.Label(bar, text="Tranh luận tới khi chốt · tối đa vòng/chủ đề (0 = tắt):", bg=self.C_CARD, fg=self.C_FG,
+                 font=("Segoe UI", 9)).pack(side="left", padx=(14, 4))
+        try:
+            _r0 = max(0, min(10, int(self.cfg.get("niche_debate_cap", 5))))
+        except (TypeError, ValueError):
+            _r0 = 5
+        var_rounds = tk.StringVar(value=str(_r0))
+
+        def _debate_rounds():
+            try:
+                return max(0, min(10, int(float(var_rounds.get()))))
+            except (TypeError, ValueError):
+                return 5
+
+        def _rounds_changed(_e=None):
+            n = _debate_rounds()
+            var_rounds.set(str(n))
+            if self.cfg.get("niche_debate_cap") != n:
+                self.cfg["niche_debate_cap"] = n
+                save_config(self.cfg)
+        spin_rounds = ttk.Spinbox(bar, from_=0, to=10, width=3, textvariable=var_rounds, command=_rounds_changed)
+        spin_rounds.pack(side="left")
+        spin_rounds.bind("<FocusOut>", _rounds_changed)
+        # v1.10.0: AI phân tích niche (Claude...) — tự chọn = ưu tiên Claude, rồi tới AI Brain đang chọn ở màn hình chính.
+        AI_AUTO, AI_NONE = "Tự chọn (ưu tiên Claude)", "Không dùng AI"
+        # v1.11.0: 2 AI chạy SONG SONG rồi đọc chéo bài của nhau. Giá trị = (ứng viên AI 1, ứng viên AI 2, tên 1, tên 2).
+        # v1.12.0: Claude / ChatGPT chạy bằng TÀI KHOẢN ĐĂNG NHẬP (Claude Code / Codex) — user không muốn dùng API của 2 hãng này.
+        _CA, _GA = account_brain.CLAUDE_ACCOUNT, account_brain.CHATGPT_ACCOUNT
+        _apply_account_models(self.cfg)
+        AI_DUAL_MAIN = "Claude + ChatGPT — tài khoản (song song, đối chiếu)"
+        AI_DUAL = {
+            AI_DUAL_MAIN: ([_CA], [_GA], "Claude", "ChatGPT"),
+            "Claude tài khoản + Gemini (song song, đối chiếu)": ([_CA], ["gemini"], "Claude", "Gemini"),
+        }
+        AI_ACCOUNT = {"Claude — tài khoản đăng nhập": _CA, "ChatGPT — tài khoản đăng nhập": _GA}
+        _AI_OLD = {"Claude + ChatGPT (song song, đối chiếu)": AI_DUAL_MAIN,                # nhãn bản v1.11.0 (API key)
+                   "Claude + Gemini (song song, đối chiếu)": "Claude tài khoản + Gemini (song song, đối chiếu)"}
+        _ai_values = [AI_AUTO, AI_DUAL_MAIN] + list(AI_ACCOUNT) + list(AI_DUAL)[1:] \
+            + [b for b in self._brain_values() if b != "none"] + [AI_NONE]
+        _ai_saved = str(self.cfg.get("niche_ai") or "")
+        _ai_saved = _AI_OLD.get(_ai_saved, _ai_saved)
+        var_ai = tk.StringVar(value=_ai_saved if _ai_saved in _ai_values else AI_AUTO)
+        cbo_ai = ttk.Combobox(ai_fr, textvariable=var_ai, values=_ai_values, state="readonly", width=50)
+        lbl_ai.pack(side="left")
+        cbo_ai.pack(side="left", padx=(10, 0))
+        btn_acc.pack(side="right")
+        lbl_acc.pack(side="left", fill="x", expand=True, padx=(10, 8))
+
+        def _ai_changed(_e=None):
+            self.cfg["niche_ai"] = "" if var_ai.get() == AI_AUTO else var_ai.get()
+            save_config(self.cfg)
+        cbo_ai.bind("<<ComboboxSelected>>", _ai_changed)
+        ttk.Button(bar, text="Đóng", style="Tool.TButton",
+                   command=lambda: (setattr(self, "_niche_dialog", None), win.destroy())).pack(side="right")
+
+        def _split(text, seps):
+            import re as _re
+            out = []
+            for it in _re.split(seps, text or ""):
+                it = it.strip()
+                if it and it.lower() not in [x.lower() for x in out]:
+                    out.append(it)
+            return out
+
+        def _fill(n):
+            n = n or {}
+            var_name.set(n.get("name", ""))
+            var_desc.set(n.get("description", ""))
+            var_neg.set("; ".join(n.get("negative") or []))
+            var_groups.set("; ".join(n.get("groups") or []))
+            var_sync.set(bool(n.get("sync_locale", True)))
+            _vm = n.get("video_minutes") or 0
+            var_vmin.set(("%g" % _vm) if _vm else "")
+            for t, key in ((txt_kw, "keywords"), (txt_ch, "channels")):
+                t.delete("1.0", "end")
+                t.insert("1.0", "\n".join(n.get(key) or []))
+
+        def _reload(select=None):
+            lst.delete(0, "end")
+            for n in niches:
+                lst.insert("end", f"{n.get('name', '?')}  ({len(n.get('keywords') or [])} từ khóa"
+                                  + (" · đã học" if (n.get("learned") or {}).get("at") else "") + ")")
+            if select is not None and 0 <= select < len(niches):
+                lst.selection_set(select)
+                state["idx"] = select
+                _fill(niches[select])
+            else:
+                state["idx"] = None
+                _fill({})
+
+        def _persist(msg):
+            self.cfg["niches"] = [dict(n) for n in niches]
+            ok = save_config(self.cfg)
+            status.config(text=msg if ok else "Không ghi được app_config.json — kiểm tra quyền ghi thư mục data.",
+                          fg=self.C_OK_FG if ok else self.C_ERR_FG)
+
+        def _on_select(_e=None):
+            sel = lst.curselection()
+            if sel:
+                state["idx"] = int(sel[0])
+                _fill(niches[state["idx"]])
+                L = niches[state["idx"]].get("learned") or {}
+                status.config(fg=self.C_MUTED, text=(
+                    f"Đã học từ kênh đối thủ lúc {L.get('at')}: {len(L.get('terms') or [])} từ vựng, "
+                    f"{L.get('videos', 0)} video, {L.get('comments', 0)} bình luận." if L.get("at") else ""))
+
+        def _new():
+            lst.selection_clear(0, "end")
+            state["idx"] = None
+            _fill({})
+            status.config(text="Niche mới — điền rồi bấm 'Lưu niche'.", fg=self.C_MUTED)
+            ent_name.focus_set()
+
+        def _refuse(msg, widget=None):
+            """Không lưu được -> báo ĐỎ, kêu chuông, đưa con trỏ vào ô còn thiếu và nháy viền ô đó."""
+            status.config(text="CHƯA LƯU — " + msg, fg=self.C_ERR_FG)
+            try:
+                win.bell()
+                if widget is not None:
+                    widget.focus_set()
+                    if isinstance(widget, tk.Text):
+                        widget.config(highlightbackground=self.C_ERR_FG, highlightcolor=self.C_ERR_FG, highlightthickness=2)
+                        win.after(2500, lambda: widget.winfo_exists() and widget.config(
+                            highlightbackground=self.C_BORDER, highlightcolor=self.C_ACCENT, highlightthickness=1))
+            except Exception:
+                pass
+
+        def _save():
+            name = var_name.get().strip()
+            kws = _split(txt_kw.get("1.0", "end"), r"[\r\n]+")
+            chs = _split(txt_ch.get("1.0", "end"), r"[\r\n]+")
+            if not name:
+                _refuse("Thiếu tên niche.", ent_name)
+                return
+            if not kws and not chs:
+                _refuse("cần ít nhất 1 từ khóa ở ô 'Từ khóa đuôi dài' (mỗi dòng 1 từ khóa). Chưa có từ khóa thì nhập ít nhất "
+                        "1 kênh đối thủ rồi bấm 'Học niche từ kênh đối thủ' để lấy từ khóa gợi ý.", txt_kw)
+                return
+            for i, n in enumerate(niches):
+                if i != state["idx"] and str(n.get("name", "")).strip().lower() == name.lower():
+                    _refuse(f"Đã có niche tên '{name}' — chọn nó trong danh sách để sửa.", ent_name)
+                    return
+            vmin_raw = var_vmin.get().strip().replace(",", ".")
+            try:
+                vmin = float(vmin_raw) if vmin_raw else 0.0
+            except ValueError:
+                vmin = -1.0
+            if vmin < 0 or vmin > 600:
+                _refuse("'Video đối thủ dài' phải là số phút (vd: 20), hoặc để trống.")
+                return
+            item = {"name": name, "description": var_desc.get().strip(), "keywords": kws,
+                    "video_minutes": vmin,
+                    "channels": chs,
+                    "negative": _split(var_neg.get(), r"[;\r\n]+"),
+                    "groups": _split(var_groups.get(), r"[;\r\n]+"),
+                    "sync_locale": bool(var_sync.get())}
+            if state["idx"] is None:
+                niches.append(item)
+                idx = len(niches) - 1
+            else:
+                idx = state["idx"]
+                if niches[idx].get("learned"):      # v1.9.4: sửa niche không làm mất phần đã học
+                    item["learned"] = niches[idx]["learned"]
+                niches[idx] = item
+            _reload(idx)
+            warn = ""
+            if not kws:
+                warn = (" CHƯA có từ khóa: bấm 'Học niche từ kênh đối thủ' để lấy từ khóa gợi ý, hoặc nhập tay "
+                        "(chưa có thì phiên tạm dùng từ khóa chủ đề).")
+            elif len(kws) < 10:
+                warn = f" Lưu ý: mới có {len(kws)} từ khóa (SOP khuyên 15–20)."
+            if not item["channels"]:
+                warn += " Chưa có kênh đối thủ."
+            try:
+                _t = channel_mode.normalize_niche(item)["typical_len_s"]
+                if _t:
+                    _lo, _hi = channel_mode.session_range_min(_t)
+                    warn += f" Video đối thủ ~{_t // 60} phút → mỗi phiên khoảng {_lo}–{_hi} phút."
+            except Exception:
+                pass
+            _persist(f"Đã lưu niche '{name}'.{warn}")
+            return True
+
+        def _delete():
+            idx = state["idx"]
+            if idx is None:
+                return
+            if not messagebox.askyesno("Xóa niche", f"Xóa niche '{niches[idx].get('name', '')}'?", parent=win):
+                return
+            name = niches.pop(idx).get("name", "")
+            _reload(None)
+            _persist(f"Đã xóa niche '{name}'.")
+
+        # ---------------------------------------------------------- v1.9.4: học niche qua YouTube API (kho key: v1.9.8)
+        job = {"busy": False, "res": None, "lines": [], "kind": "", "dead": [], "keys": [],
+               "events": [], "chat": None, "typing": None, "names": [], "name": "", "rounds": 0}
+
+        def _key_summary():
+            """Cập nhật dòng tóm tắt kho key (gọi lại mỗi khi cửa sổ Quản lý key thay đổi)."""
+            try:
+                if not win.winfo_exists():
+                    return
+                pool = niche_learner.pool_load()
+            except Exception:
+                pool = []
+            if pool:
+                lbl_key.config(text=niche_learner.pool_summary(pool) + ". Key hết quota thì bot tự chuyển sang key kế.",
+                               fg=self.C_MUTED)
+            else:
+                lbl_key.config(text="Chưa có key — bấm 'Quản lý key…' để dán key (dán được hàng trăm key một lần). "
+                                    "Key chỉ dùng để ĐỌC video + bình luận công khai của kênh đối thủ.", fg=self.C_MUTED)
+
+        def _busy(on, kind=""):
+            job["busy"], job["kind"] = on, kind
+            try:
+                btn_learn.config(state="disabled" if on else "normal")
+            except Exception:
+                pass
+
+        def _pool_after(ok):
+            """Sau 1 lần học: ghi vào kho key nào vừa chết (sai/hết quota) và key nào vừa dùng được."""
+            try:
+                pool = niche_learner.pool_load()
+                dead = dict(job["dead"])
+                for k, why in dead.items():
+                    niche_learner.pool_mark(pool, k, False, why)
+                if ok:
+                    for k in job["keys"]:
+                        if k not in dead:
+                            niche_learner.pool_mark(pool, k, True, used=True)
+                            break
+                if dead or ok:
+                    moved = niche_learner.env_key_count()
+                    if niche_learner.pool_save(pool) and moved:
+                        print(f"[+] Đã chuyển {moved} key YouTube từ .env sang kho key data/youtube_keys.json.")
+                if dead:
+                    print(f"[Niche] {len(dead)} key vừa hết quota/hỏng — đã ghi vào kho key, lần sau bot bỏ qua.")
+            except Exception as e:
+                print(f"[!] Không cập nhật được kho key: {str(e)[:120]}")
+            job["dead"], job["keys"] = [], []
+            _key_summary()
+
+        def _poll():
+            try:
+                if not win.winfo_exists():
+                    return
+            except Exception:
+                return
+            while job["lines"]:          # luồng nền chỉ xếp hàng; in + cập nhật Tk ở luồng chính
+                line = job["lines"].pop(0)
+                print(f"[Niche] {line}")
+                job["last"] = line
+            while job["events"]:         # v1.14.0: lượt nói của 2 AI vừa tới -> đưa vào khung chat đang mở
+                try:
+                    _live(job["events"].pop(0))
+                except Exception as e:
+                    print(f"[!] Khung chat 2 AI: {str(e)[:120]}")
+            _live_note()
+            res = job["res"]
+            if res is None:
+                # v1.13.1: đồng hồ chạy liên tục + bước hiện tại -> lúc AI đang nghĩ (30–60 giây/vòng) vẫn thấy bot còn sống
+                if job.get("last"):
+                    el = int(time.time() - job.get("t0", time.time()))
+                    status.config(text=f"Đang học ({el // 60}:{el % 60:02d}) — " + job["last"][:150], fg=self.C_MUTED)
+                win.after(300, _poll)
+                return
+            job["res"] = None
+            _busy(False)
+            _pool_after(not res.get("err"))
+            if res.get("err"):
+                status.config(text="Học niche thất bại: " + res["err"], fg=self.C_ERR_FG)
+                print(f"[!] Học niche '{res.get('name', '')}' thất bại: {res['err']}")
+                _live_done(None, res["err"])
+                return
+            L, name = res["learned"], res["name"]
+            A = L.get("ai") or {}
+            filled = []
+            for i, n in enumerate(niches):
+                if str(n.get("name", "")).strip().lower() == name.lower():
+                    n["learned"] = L
+                    # v1.10.0: AI tự ĐIỀN các ô còn TRỐNG (không đè lên thứ user đã nhập)
+                    if A.get("keywords") and not n.get("keywords"):
+                        n["keywords"] = list(A["keywords"][:20])
+                        filled.append(f"{len(n['keywords'])} từ khóa đuôi dài")
+                    if A.get("description") and not str(n.get("description") or "").strip():
+                        n["description"] = A["description"][:300]
+                        filled.append("mô tả")
+                    if A.get("negative") and not n.get("negative"):
+                        n["negative"] = list(A["negative"])
+                        filled.append(f"{len(n['negative'])} từ loại trừ")
+                    _reload(i)
+                    break
+            _persist(f"Đã học niche '{name}': {len(L['channels'])} kênh, {L['videos']} video, {L['comments']} bình luận → "
+                     f"{len(L['terms'])} từ vựng, {len(L['suggest'])} từ khóa gợi ý"
+                     + (f", video đối thủ dài ~{int(L['typical_len_s']) // 60} phút" if L.get("typical_len_s") else "")
+                     + (f". AI {A.get('brain', '')} đã phân tích" + (" và điền sẵn: " + ", ".join(filled) if filled else
+                                                                   f" ({len(A.get('keywords') or [])} từ khóa mới, "
+                                                                   f"{len(A.get('tags') or [])} tag — xem ở cửa sổ kết quả)")
+                        if A else ("" if L.get("audience") else " (chưa có phân tích của AI — không AI nào trả lời)"))
+                     + "." + (" LƯU Ý: " + L["ai_note"] + "." if L.get("ai_note") else ""))
+            print(f"[+] Học niche '{name}' xong: {len(L['terms'])} từ vựng đặc trưng, ~{L['units']} đơn vị quota.")
+            _show_learned()
+            _live_done(L, "")
+
+        def _learn():
+            if job["busy"]:
+                return
+            # v1.9.9: bấm "Học niche" là TỰ LƯU những gì đang điền trong form trước (niche mới chưa lưu / vừa sửa kênh đối thủ)
+            # — bản trước bắt lưu tay trước, mà lưu lại đòi có từ khóa -> user điền tên + kênh rồi kẹt ở cả 2 nút.
+            if not _save():
+                return
+            idx = state["idx"]
+            if idx is None:
+                return
+            niche = dict(niches[idx])
+            if not niche.get("channels"):
+                _refuse("niche này chưa có kênh đối thủ — nhập link kênh (mỗi dòng 1 kênh) rồi bấm lại 'Học niche từ kênh đối thủ'.",
+                        txt_ch)
+                return
+            try:
+                pool = niche_learner.pool_load()
+            except Exception:
+                pool = []
+            keys = niche_learner.pool_usable(pool)
+            if not pool:
+                status.config(text="Chưa có YouTube API key — bấm 'Quản lý key…' ở dải phía trên để thêm key.",
+                              fg=self.C_ERR_FG)
+                return
+            if not keys:
+                status.config(text=f"Cả {len(pool)} key đều đang hết quota hoặc hỏng — mở 'Quản lý key…' để kiểm tra lại / "
+                                   "thêm key.", fg=self.C_ERR_FG)
+                return
+            job["keys"], job["dead"] = list(keys), []
+            try:
+                bt = str(self.cbo_brain.get() or "").strip()
+            except Exception:
+                bt = ""
+            sel = var_ai.get()
+            dual = AI_DUAL.get(sel)
+            if sel == AI_NONE:
+                cands = []
+            else:       # AI đã chọn (nếu có) -> tài khoản đăng nhập (Claude, ChatGPT) -> AI Brain màn hình chính -> AI còn key
+                env = list(_brain_candidates_from_env())
+                acc = [n for n, f in ((_CA, account_brain.find_claude), (_GA, account_brain.find_codex)) if f()]
+
+                def _paid(b):       # máy đã có công cụ tài khoản của hãng nào thì KHÔNG tự rơi về API trả tiền của hãng đó
+                    return (_CA in acc and str(b).startswith("claude-") and b != _CA) or (_GA in acc and b == "openai")
+                rest = [b for b in ([bt] if bt and bt != "none" else []) + env if not _paid(b)]
+                first = [] if (sel == AI_AUTO or dual) else [AI_ACCOUNT.get(sel, sel)]
+                order = first + acc + [b for b in rest if b.startswith("claude")] + rest
+                cands = [b for i, b in enumerate(order) if b and b not in order[:i]]
+            name = str(niche.get("name", ""))
+            _busy(True, "learn")
+            job["t0"], job["last"] = time.time(), ""
+            job["events"], job["chat"], job["typing"], job["names"] = [], None, None, []
+            job["finish"], job["fin_btn"] = False, None
+            job["name"], job["rounds"] = name, _debate_rounds()
+            _events, _n_rounds = job["events"], job["rounds"]
+            status.config(text=f"Đang đọc {min(len(niche['channels']), niche_learner.MAX_CHANNELS)} kênh đối thủ…",
+                          fg=self.C_MUTED)
+
+            _run = {"on": True}
+
+            def _tlog(msg):
+                if _run["on"]:          # lượt học đã kết thúc (vd lỗi đọc kênh) thì luồng kiểm tra AI còn sót không ghi thêm
+                    job["lines"].append(str(msg))
+
+            def _plog(m):
+                _tlog(str(m).replace(" để sinh chủ đề", "").replace("[System] ", ""))
+
+            def _nice(n):       # "claude-account" -> "Claude tài khoản" (tên hiện trong báo cáo)
+                return account_brain.ACCOUNT_LABELS.get(n, n)
+
+            def _pick_ai():
+                """v1.14.1: chọn + thử AI. Chạy ở LUỒNG NỀN cùng lúc với việc đọc kênh; 2 AI được thử CÙNG LÚC (đo thật:
+                lần lượt 8 giây -> cùng lúc 5 giây, và 5 giây đó trùng với lúc đọc kênh)."""
+                brain, _bn, brain2, _bn2, note = None, "", None, "", ""
+                if dual:
+                    c1, c2, lab1, lab2 = dual
+                    _tlog(f"Đang kiểm tra 2 AI cùng lúc: {lab1} và {lab2}…")
+                    got = {}
+
+                    def _one(i, c):
+                        try:
+                            got[i] = _pick_live_brain(list(c), log=_plog)
+                        except Exception as e:
+                            got[i] = (None, "", f"{type(e).__name__}: {str(e)[:120]}")
+                    ths = [threading.Thread(target=_one, args=(i, c), daemon=True) for i, c in enumerate((c1, c2))]
+                    for th in ths:
+                        th.start()
+                    for th in ths:
+                        th.join()
+                    (b1, n1, w1), (b2, n2, w2) = got[0], got[1]
+                    if b1 is not None and b2 is not None:
+                        brain, _bn, brain2, _bn2 = b1, n1, b2, n2
+                    elif b1 is not None or b2 is not None:
+                        brain, _bn = (b1, n1) if b1 is not None else (b2, n2)
+                        _dead, _w = (lab2, w2) if b1 is not None else (lab1, w1)
+                        _fix = (f"bấm 'Tài khoản AI…' để kiểm tra / đăng nhập lại {_dead}"
+                                if (c2 if b1 is not None else c1)[0] in account_brain.ACCOUNT_LABELS
+                                else f"nạp credit hoặc đổi key của {_dead} ở Công cụ → Quản lý API key")
+                        note = (f"{_dead} không dùng được ({_w}) nên chỉ {_nice(_bn)} phân tích, KHÔNG có đối chiếu chéo — "
+                                + _fix)
+                        _tlog(note + ".")
+                    else:
+                        note = f"cả {lab1} ({w1}) và {lab2} ({w2}) đều không dùng được"
+                        _tlog(note + " — thử AI khác còn key.")
+                _rest = [c for c in cands if not dual or c not in list(dual[0]) + list(dual[1])]   # 2 AI vừa chết: khỏi hỏi lại
+                if brain is None and _rest:
+                    _tlog(f"Đang tìm AI còn dùng được ({', '.join(_rest[:4])})…")
+                    brain, _bn, _why = _pick_live_brain(_rest, log=_plog)
+                    if brain is None:
+                        _tlog(f"Không AI nào trả lời ({_why}) — chỉ rút từ vựng theo thống kê, không có phân tích của AI.")
+                elif brain is None:
+                    _tlog("Đã chọn 'Không dùng AI' — chỉ rút từ vựng theo thống kê.")
+                return {"brain": brain, "brain_name": _nice(_bn), "brain2": brain2, "brain2_name": _nice(_bn2), "ai_note": note}
+
+            def _work():
+                try:
+                    picked = {}
+
+                    def _bg():
+                        try:
+                            picked["v"] = _pick_ai()
+                        except Exception as e:
+                            picked["v"] = {"ai_note": f"không kiểm tra được AI ({type(e).__name__}: {str(e)[:120]})"}
+                    pt = threading.Thread(target=_bg, daemon=True)
+                    pt.start()
+
+                    def _wait_ai():
+                        pt.join()
+                        return picked.get("v") or {}
+                    job["res"] = {"learned": niche_learner.learn_niche(
+                        niche, keys, pick_ai=_wait_ai, log=_tlog, on_key_dead=lambda k, why: job["dead"].append((k, why)),
+                        debate_rounds=_n_rounds, on_event=_events.append,
+                        should_finish=lambda: bool(job.get("finish"))), "name": name}
+                except niche_learner.LearnError as e:
+                    job["res"] = {"err": str(e), "name": name}
+                except Exception as e:
+                    job["res"] = {"err": f"{type(e).__name__}: {str(e)[:200]}", "name": name}
+                finally:
+                    _run["on"] = False
+            threading.Thread(target=_work, daemon=True).start()
+            _poll()
+
+        chat_state = {"C": None}
+
+        def _chat_open(title):
+            """v1.14.0: KHUNG CHAT 2 AI — dùng cho cả xem lại lẫn hiện TRỰC TIẾP lúc 2 AI đang đấu trí. AI thứ nhất bên trái,
+            AI thứ hai bên phải, lời dẫn của bot ở giữa. Mỗi lúc chỉ 1 khung. -> {win, text, add(msg, see), note(text, fg), plain}."""
+            old = chat_state["C"]
+            try:
+                if old and old["win"].winfo_exists():
+                    old["win"].destroy()
+            except Exception:
+                pass
+            dw = tk.Toplevel(self.root)
+            dw.title(title)
+            dw.configure(bg=self.C_CARD)
+            W0 = min(940, dw.winfo_screenwidth() - 80)
+            dw.geometry(f"{W0}x{min(740, dw.winfo_screenheight() - 120)}")
+            dw.transient(win)
+            dbar = tk.Frame(dw, bg=self.C_CARD, padx=12, pady=10)
+            dbar.pack(side="bottom", fill="x")
+            dmsg = tk.Label(dbar, text="", bg=self.C_CARD, fg=self.C_MUTED, font=("Segoe UI", 9), anchor="w")
+            box = tk.Frame(dw, bg=self.C_CARD)
+            box.pack(side="top", fill="both", expand=True, padx=12, pady=(12, 0))
+            sb = ttk.Scrollbar(box, orient="vertical")
+            sb.pack(side="right", fill="y")
+            chat = tk.Text(box, wrap="word", bg=self.C_BG, fg=self.C_FG, relief="flat", padx=14, pady=10, cursor="arrow",
+                           font=("Segoe UI", 10), highlightthickness=1, highlightbackground=self.C_BORDER,
+                           yscrollcommand=sb.set, takefocus=0, state="disabled")
+            chat.pack(side="left", fill="both", expand=True)
+            sb.config(command=chat.yview)
+            chat.tag_configure("left", justify="left", spacing3=6)
+            chat.tag_configure("right", justify="right", spacing3=6)
+            chat.tag_configure("center", justify="center", spacing1=6, spacing3=10)
+            chat.tag_configure("name0", justify="left", font=("Segoe UI", 9, "bold"), foreground=self.C_ACCENT, spacing1=10, spacing3=3)
+            chat.tag_configure("name1", justify="right", font=("Segoe UI", 9, "bold"), foreground=self.C_ACCENT_2, spacing1=10,
+                               spacing3=3)
+            bubbles, plain = [], [""]
+            wrap = [max(300, int((W0 - 80) * 0.74))]
+
+            def _wheel(e):
+                chat.yview_scroll(int(-e.delta / 120 * 70), "pixels")
+                return "break"
+            chat.bind("<MouseWheel>", _wheel)
+
+            def add(m, see=True):
+                side = m.get("side", 0)
+                chat.config(state="normal")
+                top = chat.index("end-1c")
+                if side < 0:
+                    lb = tk.Label(chat, text=m.get("text", ""), bg=self.C_BG, fg=self.C_MUTED, font=("Segoe UI", 9, "italic"),
+                                  wraplength=wrap[0], justify="center", padx=10, pady=4)
+                    tag = "center"
+                else:
+                    side = 1 if side == 1 else 0
+                    chat.insert("end", m.get("name", "") + (f"  ·  {m['model']}" if m.get("model") else "") + "   —   "
+                                + m.get("sub", "") + "\n", f"name{side}")
+                    lb = tk.Label(chat, text=m.get("text", ""), bg=self.C_FIELD if side == 0 else self.C_ACCENT_SOFT,
+                                  fg=self.C_FG, font=("Segoe UI", 10), wraplength=wrap[0], justify="left", anchor="w",
+                                  padx=14, pady=10)
+                    tag = "left" if side == 0 else "right"
+                lb.bind("<MouseWheel>", _wheel)
+                bubbles.append(lb)
+                at = chat.index("end-1c")
+                chat.window_create("end", window=lb)
+                chat.insert("end", "\n")
+                chat.tag_add(tag, at, "end-1c")
+                chat.config(state="disabled")
+                if see:              # đưa lời vừa tới lên đầu khung nhìn (bong chat dài vẫn đọc được từ dòng đầu)
+                    try:
+                        chat.yview(top)
+                    except Exception:
+                        pass
+
+            def _rewrap(e):
+                wrap[0] = max(300, int((e.width - 60) * 0.74))
+                for b in bubbles:
+                    try:
+                        b.config(wraplength=wrap[0])
+                    except Exception:
+                        pass
+            chat.bind("<Configure>", _rewrap)
+
+            def note(text, fg=None):
+                try:
+                    dmsg.config(text=text, fg=fg or self.C_MUTED)
+                except Exception:
+                    pass
+
+            def _copy_all():
+                if not plain[0]:
+                    note("Chưa chép được — cuộc đấu trí chưa xong.")
+                    return
+                try:
+                    dw.clipboard_clear()
+                    dw.clipboard_append(plain[0])
+                    note("Đã chép toàn bộ đối thoại.", self.C_OK_FG)
+                except Exception as e:
+                    note(f"Không chép được: {str(e)[:80]}", self.C_ERR_FG)
+            ttk.Button(dbar, text="Chép toàn bộ", style="Tool.TButton", command=_copy_all).pack(side="left")
+            dmsg.pack(side="left", fill="x", expand=True, padx=10)
+            ttk.Button(dbar, text="Đóng", style="Tool.TButton", command=dw.destroy).pack(side="right")
+            dw.lift()
+            C = {"win": dw, "text": chat, "add": add, "note": note, "plain": plain, "bar": dbar}
+            chat_state["C"] = C
+            return C
+
+        def _chat_alive(C):
+            try:
+                return bool(C) and bool(C["win"].winfo_exists())
+            except Exception:
+                return False
+
+        def _show_dialog():
+            """Xem lại cuộc đối thoại / đấu trí 2 AI của lần học gần nhất (niche đang chọn) trong khung chat."""
+            idx = state["idx"]
+            L = (niches[idx].get("learned") or {}) if idx is not None else {}
+            msgs = niche_learner.dialog_messages(L)
+            if not msgs:
+                status.config(text=("Niche này chưa có đối thoại 2 AI — chọn 'Claude + ChatGPT — tài khoản (song song, đối chiếu)' "
+                                    "ở ô AI phân tích rồi bấm 'Học niche từ kênh đối thủ' (tranh luận tới cùng mất 5–10 phút)."),
+                            fg=self.C_MUTED)
+                return
+            C = _chat_open(f"Đối thoại 2 AI — {niches[idx].get('name', '')}")
+            for m in msgs:
+                C["add"](m, see=False)
+            C["plain"][0] = niche_learner.format_dialog(L)
+            C["text"].yview_moveto(0)
+
+        def _live(ev):
+            """1 sự kiện từ luồng 2 AI (chạy ở luồng chính, trong _poll): mở khung chat / đang soạn / 1 lượt nói vừa xong."""
+            kind = ev.get("ev")
+            if kind == "start":
+                job["names"] = list(ev.get("names") or [])
+                C = job["chat"] = _chat_open(f"Đấu trí 2 AI — {job.get('name', '')} (đang diễn ra)")
+                C["add"]({"side": -1, "text": niche_learner.dialog_intro(ev.get("debate_rounds") or 0)})
+                if ev.get("debate_rounds"):
+                    # v1.16.0: tranh luận tới cùng có thể dài -> cho người dùng tự cho dừng, 2 AI viết bản chốt luôn
+
+                    def _finish_now():
+                        job["finish"] = True
+                        try:
+                            job["fin_btn"].config(state="disabled", text="Đang chốt…")
+                        except Exception:
+                            pass
+                    job["fin_btn"] = ttk.Button(C["bar"], text="Dừng tranh luận — chốt luôn", style="Tool.TButton",
+                                                command=_finish_now)
+                    job["fin_btn"].pack(side="right", padx=(0, 6))
+                return
+            C = job.get("chat")
+            if not _chat_alive(C):
+                return
+            if kind == "typing":
+                job["typing"] = {"who": list(ev.get("who") or []), "what": str(ev.get("what") or ""), "t": time.time()}
+            elif kind == "turn":
+                t = ev.get("turn") or {}
+                names = job.get("names") or []
+                C["add"](niche_learner.turn_message(t, names.index(t.get("ai")) if t.get("ai") in names else 0))
+                ty = job.get("typing")
+                if ty and t.get("ai") in ty["who"]:
+                    ty["who"].remove(t["ai"])
+
+        def _live_note():
+            """Dòng 'đang soạn…' dưới khung chat, có đếm giây."""
+            C, ty = job.get("chat"), job.get("typing")
+            if _chat_alive(C) and job["busy"] and ty and ty["who"]:
+                C["note"](f"✍  {' và '.join(ty['who'])} {ty['what']}…  ({int(time.time() - ty['t'])} giây)")
+
+        def _live_done(L, err):
+            """Lần học kết thúc: chốt khung chat đang mở (lời kết của bot, bản để chép, đổi tiêu đề)."""
+            C = job.get("chat")
+            job["typing"] = None
+            try:
+                if job.get("fin_btn") is not None:
+                    job["fin_btn"].destroy()
+            except Exception:
+                pass
+            job["fin_btn"] = None
+            if not _chat_alive(C):
+                return
+            el = int(time.time() - job.get("t0", time.time()))
+            if err:
+                C["note"]("Dừng giữa chừng: " + str(err)[:160], self.C_ERR_FG)
+                return
+            A = (L or {}).get("ai") or {}
+            if A.get("dialog"):
+                C["add"]({"side": -1, "text": niche_learner.dialog_outro(A)})
+                C["plain"][0] = niche_learner.format_dialog(L)
+                C["note"](f"Xong sau {el // 60}:{el % 60:02d} — {niche_learner.spoken_turns(A['dialog'])} lượt nói. Danh sách đã gộp nằm ở cửa sổ "
+                          f"'Kết quả học niche'.", self.C_OK_FG)
+            else:
+                C["note"]("Hai AI không trả lời được — xem dòng trạng thái ở cửa sổ Niche.", self.C_ERR_FG)
+            try:
+                C["win"].title(f"Đối thoại 2 AI — {job.get('name', '')}")
+                C["win"].lift()
+            except Exception:
+                pass
+
+        def _show_learned():
+            idx = state["idx"]
+            L = (niches[idx].get("learned") or {}) if idx is not None else {}
+            if not L.get("at"):
+                status.config(text="Niche này chưa học lần nào — bấm 'Học niche từ kênh đối thủ'.", fg=self.C_MUTED)
+                return
+            name = niches[idx].get("name", "")
+            rw = tk.Toplevel(self.root)
+            rw.title(f"Kết quả học niche — {name}")
+            rw.configure(bg=self.C_CARD)
+            rw.geometry("780x580")
+            rw.transient(win)
+            rbar = tk.Frame(rw, bg=self.C_CARD, padx=12, pady=10)
+            rbar.pack(side="bottom", fill="x")
+            rmsg = tk.Label(rbar, text="", bg=self.C_CARD, fg=self.C_MUTED, font=("Segoe UI", 9), anchor="w")
+            txt = tk.Text(rw, wrap="word", bg=self.C_FIELD, fg=self.C_FG, relief="flat", padx=10, pady=8,
+                          font=("Segoe UI", 10), highlightthickness=1, highlightbackground=self.C_BORDER)
+            txt.pack(side="top", fill="both", expand=True, padx=12, pady=(12, 0))
+            txt.insert("1.0", niche_learner.format_report(L))
+            txt.config(state="disabled")
+
+            def _add_suggest():
+                for i, n in enumerate(niches):
+                    if str(n.get("name", "")).strip().lower() == str(name).strip().lower():
+                        have = [str(k).lower() for k in (n.get("keywords") or [])]
+                        pool_kw = list((L.get("ai") or {}).get("keywords") or []) + list(L.get("suggest") or [])
+                        new = []
+                        for k in pool_kw:                      # từ khóa AI đề xuất trước, rồi tới tag thống kê
+                            if k.lower() not in have and k.lower() not in [x.lower() for x in new]:
+                                new.append(k)
+                        if not new:
+                            rmsg.config(text="Không còn từ khóa gợi ý nào chưa có trong niche.")
+                            return
+                        n["keywords"] = list(n.get("keywords") or []) + new
+                        _reload(i)
+                        _persist(f"Đã thêm {len(new)} từ khóa gợi ý vào niche '{name}'.")
+                        rmsg.config(text=f"Đã thêm {len(new)} từ khóa vào niche.", fg=self.C_OK_FG)
+                        return
+                rmsg.config(text="Niche đã bị xóa/đổi tên — mở lại cửa sổ Niche.", fg=self.C_ERR_FG)
+
+            def _copy_tags():
+                tags = list((L.get("ai") or {}).get("tags") or []) or list(L.get("tags") or [])
+                if not tags:
+                    rmsg.config(text="Chưa có tag nào để chép.", fg=self.C_MUTED)
+                    return
+                try:
+                    rw.clipboard_clear()
+                    rw.clipboard_append(", ".join(tags))
+                    rmsg.config(text=f"Đã chép {len(tags)} tag (ngăn bằng dấu phẩy) — dán vào ô Tags của YouTube.",
+                                fg=self.C_OK_FG)
+                except Exception as e:
+                    rmsg.config(text=f"Không chép được: {str(e)[:80]}", fg=self.C_ERR_FG)
+
+            ttk.Button(rbar, text="Thêm từ khóa gợi ý vào niche", style="Tool.TButton",
+                       command=_add_suggest).pack(side="left")
+            ttk.Button(rbar, text="Chép tag", style="Tool.TButton", command=_copy_tags).pack(side="left", padx=(6, 0))
+            if (L.get("ai") or {}).get("dialog"):
+                ttk.Button(rbar, text="Xem đối thoại 2 AI", style="Tool.TButton",
+                           command=_show_dialog).pack(side="left", padx=(6, 0))
+            _sheet = str((L.get("thumbs") or {}).get("path") or "")
+            if _sheet and os.path.isfile(_sheet):         # v1.16.0: ảnh ghép thumbnail đối thủ mà 2 AI đã xem (có đánh số)
+
+                def _open_sheet():
+                    try:
+                        os.startfile(_sheet)
+                    except Exception as e:
+                        rmsg.config(text=f"Không mở được ảnh: {str(e)[:80]}", fg=self.C_ERR_FG)
+                ttk.Button(rbar, text="Xem ảnh thumbnail", style="Tool.TButton", command=_open_sheet).pack(side="left", padx=(6, 0))
+            rmsg.pack(side="left", fill="x", expand=True, padx=10)
+            ttk.Button(rbar, text="Đóng", style="Tool.TButton", command=rw.destroy).pack(side="right")
+            rw.lift()
+
+        acc_state = {"c": None, "g": None, "subs": [], "win": None}
+
+        def _acc_refresh():
+            """Hỏi tình trạng đăng nhập Claude / ChatGPT ở luồng phụ (mỗi lệnh ~1 giây); luồng chính cập nhật nhãn."""
+            box = {}
+
+            def _w():
+                for k, fn in (("c", account_brain.claude_status), ("g", account_brain.codex_status)):
+                    try:
+                        box[k] = fn()
+                    except Exception as e:
+                        box[k] = {"installed": False, "logged_in": False, "plan": "", "who": "", "path": "",
+                                  "detail": f"không kiểm tra được ({str(e)[:60]})"}
+                box["done"] = True
+
+            def _wait():
+                try:
+                    if not win.winfo_exists():
+                        return
+                except Exception:
+                    return
+                if not box.get("done"):
+                    win.after(150, _wait)
+                    return
+                acc_state["c"], acc_state["g"] = box["c"], box["g"]
+                both = box["c"]["logged_in"] and box["g"]["logged_in"]
+                lbl_acc.config(text=f"Claude: {box['c']['detail']}  ·  ChatGPT: {box['g']['detail']}",
+                               fg=self.C_OK_FG if both else self.C_WARN_FG)
+                for cb in list(acc_state["subs"]):
+                    try:
+                        cb()
+                    except Exception:
+                        pass
+            lbl_acc.config(text="Đang kiểm tra tài khoản Claude / ChatGPT…", fg=self.C_MUTED)
+            threading.Thread(target=_w, daemon=True).start()
+            _wait()
+
+        def _open_ai_accounts():
+            """Cửa sổ 'Tài khoản AI': xem tình trạng, mở màn hình đăng nhập, hỏi thử 1 câu. Không có ô nhập key nào."""
+            old = acc_state.get("win")
+            try:
+                if old is not None and old.winfo_exists():
+                    old.lift()
+                    return
+            except Exception:
+                pass
+            aw = tk.Toplevel(self.root)
+            acc_state["win"] = aw
+            aw.title("Tài khoản AI — đăng nhập, không dùng API key")
+            aw.configure(bg=self.C_CARD)
+            aw.geometry("780x500")
+            aw.transient(win)
+            abar = tk.Frame(aw, bg=self.C_CARD, padx=14, pady=10)
+            abar.pack(side="bottom", fill="x")
+            amsg = tk.Label(aw, text="", bg=self.C_CARD, fg=self.C_MUTED, font=("Segoe UI", 10), anchor="w",
+                            justify="left", wraplength=700)
+            amsg.pack(side="bottom", fill="x", padx=14, pady=(4, 0))
+            tk.Label(aw, text=("Claude và ChatGPT ở đây chạy bằng TÀI KHOẢN bạn đăng nhập (gói Claude Pro/Max, ChatGPT Plus/Pro) "
+                               "qua 2 công cụ chính thức là Claude Code và Codex. Không cần API key, không trừ credit API — "
+                               "mỗi lần phân tích tính vào hạn mức sử dụng của gói."),
+                     bg=self.C_CARD, fg=self.C_FG, font=("Segoe UI", 10), anchor="w", justify="left",
+                     wraplength=740).pack(side="top", fill="x", padx=14, pady=(14, 4))
+            tk.Label(aw, text=("Ô 'Model': Claude mặc định là sonnet (opus / fable mạnh hơn nhưng tốn hạn mức nhanh hơn; haiku nhẹ nhất). "
+                               "ChatGPT để 'Tự chọn' = model Codex xếp đầu cho tài khoản của bạn. Gõ tên model khác cũng được, "
+                               "rồi bấm 'Thử hỏi 1 câu' để biết model đó chạy được không."),
+                     bg=self.C_CARD, fg=self.C_MUTED, font=("Segoe UI", 9), anchor="w", justify="left",
+                     wraplength=740).pack(side="top", fill="x", padx=14, pady=(0, 6))
+            MODEL_AUTO = "Tự chọn"
+            model_key = {_CA: "claude_account_model", _GA: "chatgpt_account_model"}
+            try:
+                _gpt_models = account_brain.codex_listed_models()
+            except Exception:
+                _gpt_models = []
+            model_vals = {_CA: list(account_brain.CLAUDE_MODEL_CHOICES), _GA: [MODEL_AUTO] + _gpt_models}
+
+            def _set_model(name, var):
+                lab = account_brain.ACCOUNT_LABELS[name]
+                v = var.get().strip()
+                v = "" if v == MODEL_AUTO else v
+                if name == _CA and not v:
+                    v = account_brain.CLAUDE_MODEL
+                    var.set(v)
+                if v and not re.fullmatch(r"[A-Za-z0-9._:\-\[\]]{1,80}", v):
+                    amsg.config(text="Tên model chỉ gồm chữ, số và các dấu . - _ :  (ví dụ: opus, sonnet, gpt-6-luna).",
+                                fg=self.C_ERR_FG)
+                    return
+                if str(self.cfg.get(model_key[name]) or (account_brain.CLAUDE_MODEL if name == _CA else "")) == v:
+                    return
+                self.cfg[model_key[name]] = v
+                save_config(self.cfg)
+                _apply_account_models(self.cfg)
+                amsg.config(text=(f"{lab} sẽ dùng model {v or 'do Codex tự chọn'} từ lần phân tích tới — bấm 'Thử hỏi 1 câu' để "
+                                  f"kiểm tra model này chạy được với tài khoản của bạn."), fg=self.C_OK_FG)
+            install = {
+                _CA: "CHƯA CÀI Claude Code. Mở PowerShell gõ:  npm install -g @anthropic-ai/claude-code  (cần Node.js), "
+                     "rồi bấm 'Đăng nhập…'.",
+                _GA: "CHƯA CÀI Codex. Mở PowerShell gõ:  npm install -g @openai/codex  (cần Node.js), rồi bấm 'Đăng nhập…'.",
+            }
+            rows = {}
+
+            def _paint():
+                try:
+                    if not aw.winfo_exists():
+                        return
+                except Exception:
+                    return
+                for key, (name, l_st, b_in, b_try) in rows.items():
+                    st = acc_state.get(key)
+                    if not st:
+                        l_st.config(text="Đang kiểm tra…", fg=self.C_MUTED)
+                        continue
+                    if not st["installed"]:
+                        l_st.config(text=install[name], fg=self.C_WARN_FG)
+                    elif st["logged_in"]:
+                        l_st.config(text="Sẵn sàng — " + st["detail"] + ".", fg=self.C_OK_FG)
+                    else:
+                        l_st.config(text=st["detail"][:1].upper() + st["detail"][1:] + " — bấm 'Đăng nhập…'.", fg=self.C_WARN_FG)
+                    b_in.config(state="normal" if st["installed"] else "disabled",
+                                text="Đăng nhập lại…" if st["logged_in"] else "Đăng nhập…")
+                    b_try.config(state="normal" if st["logged_in"] else "disabled")
+
+            def _login(name, key):
+                lab = account_brain.ACCOUNT_LABELS[name]
+                # v1.12.1 (đo thật 23/11): `codex login` HỦY NGAY phiên đang có (token cũ trả 401 token_revoked sau ~10 giây),
+                # lượt "Học niche" đang chạy lúc đó sẽ mất ChatGPT -> đang đăng nhập rồi thì phải hỏi lại trước.
+                if (acc_state.get(key) or {}).get("logged_in") and not messagebox.askyesno(
+                        "Đăng nhập lại?",
+                        f"{lab} ĐANG đăng nhập rồi — không cần đăng nhập lại.\n\n"
+                        "Nếu đăng nhập lại: phiên hiện tại bị hủy ngay, chưa đăng nhập xong thì bot không dùng được tài khoản "
+                        "này (lượt 'Học niche' đang chạy sẽ mất AI này), và công cụ cùng tài khoản đang mở trong VS Code cũng "
+                        "phải đăng nhập lại.\n\nVẫn muốn đăng nhập lại?", parent=aw):
+                    amsg.config(text=f"Giữ nguyên phiên đăng nhập hiện tại của {lab}.", fg=self.C_MUTED)
+                    return
+                try:
+                    ok = account_brain.open_login(name)
+                except Exception as e:
+                    amsg.config(text=f"Không mở được màn hình đăng nhập {lab}: {str(e)[:120]}", fg=self.C_ERR_FG)
+                    return
+                amsg.config(text=(f"Đã mở cửa sổ đăng nhập {lab} — trình duyệt sẽ bật lên, đăng nhập XONG rồi bấm 'Kiểm tra lại' "
+                                  f"(xong mới bấm 'Học niche')."
+                                  if ok else f"Chưa cài công cụ của {lab} nên chưa đăng nhập được."),
+                            fg=self.C_MUTED if ok else self.C_ERR_FG)
+
+            def _try(name):
+                lab, box = account_brain.ACCOUNT_LABELS[name], {}
+                amsg.config(text=f"Đang hỏi thử {lab}… (thường 5–20 giây)", fg=self.C_MUTED)
+
+                def _w():
+                    t0 = time.time()
+                    try:
+                        b = account_brain.get_account_brain(name)
+                        r = b.ask_text("Reply with the single word: OK")
+                        box["res"] = (bool(r), r or b.last_error or "không trả lời", time.time() - t0,
+                                      str(getattr(b, "model_name", "") or ""))
+                    except Exception as e:
+                        box["res"] = (False, str(e)[:200], time.time() - t0, "")
+
+                def _wait():
+                    try:
+                        if not aw.winfo_exists():
+                            return
+                    except Exception:
+                        return
+                    if "res" not in box:
+                        aw.after(200, _wait)
+                        return
+                    ok, text, dt, mdl = box["res"]
+                    amsg.config(text=(f"{lab} trả lời được sau {dt:.0f} giây" + (f" (model {mdl})" if mdl else "")
+                                      + " — dùng được cho phân tích niche." if ok
+                                      else f"{lab} KHÔNG dùng được: {text}"), fg=self.C_OK_FG if ok else self.C_ERR_FG)
+                threading.Thread(target=_w, daemon=True).start()
+                _wait()
+
+            for key, name, title in (("c", _CA, "Claude  ·  qua Claude Code"), ("g", _GA, "ChatGPT  ·  qua Codex")):
+                fr = tk.Frame(aw, bg=self.C_CARD2, padx=12, pady=10)
+                fr.pack(side="top", fill="x", padx=14, pady=6)
+                top = tk.Frame(fr, bg=self.C_CARD2)
+                top.pack(fill="x")
+                tk.Label(top, text=title, bg=self.C_CARD2, fg=self.C_FG, font=("Segoe UI", 10, "bold")).pack(side="left")
+                b_try = ttk.Button(top, text="Thử hỏi 1 câu", style="Tool.TButton", command=lambda n=name: _try(n))
+                b_try.pack(side="right")
+                b_in = ttk.Button(top, text="Đăng nhập…", style="Tool.TButton", command=lambda n=name, k=key: _login(n, k))
+                b_in.pack(side="right", padx=(0, 6))
+                _cur = str(self.cfg.get(model_key[name]) or "")
+                mv = tk.StringVar(value=_cur or (account_brain.CLAUDE_MODEL if name == _CA else MODEL_AUTO))
+                cb_m = ttk.Combobox(top, textvariable=mv, values=model_vals[name], width=17)
+                cb_m.pack(side="right", padx=(0, 12))
+                tk.Label(top, text="Model:", bg=self.C_CARD2, fg=self.C_MUTED, font=("Segoe UI", 9)).pack(side="right", padx=(0, 4))
+                for _ev in ("<<ComboboxSelected>>", "<Return>", "<FocusOut>"):
+                    cb_m.bind(_ev, lambda _e, n=name, v=mv: _set_model(n, v))
+                l_st = tk.Label(fr, text="", bg=self.C_CARD2, fg=self.C_MUTED, font=("Segoe UI", 9), anchor="w",
+                                justify="left", wraplength=680)
+                l_st.pack(fill="x", pady=(6, 0))
+                rows[key] = (name, l_st, b_in, b_try)
+            ttk.Button(abar, text="Kiểm tra lại", style="Tool.TButton", command=_acc_refresh).pack(side="left")
+            ttk.Button(abar, text="Đóng", style="Tool.TButton", command=aw.destroy).pack(side="right")
+            acc_state["subs"] = [_paint]
+            _paint()
+            aw.lift()
+
+        btn_acc.config(command=_open_ai_accounts)
+        btn_key_mgr.config(command=lambda: self.open_youtube_key_manager(parent=win, on_change=_key_summary))
+        btn_learn.config(command=_learn)
+        btn_learn_view.config(command=_show_learned)
+        btn_dialog.config(command=_show_dialog)
+        _key_summary()
+        _acc_refresh()
+
+        lst.bind("<<ListboxSelect>>", _on_select)
+        btn_new.config(command=_new)
+        btn_del.config(command=_delete)
+        btn_save.config(command=_save)
+        _reload(0 if niches else None)
+        win.lift()
+
+    # ------------------------------------------------------------------ v1.9.8: KHO YOUTUBE API KEY (rất nhiều key)
+    def open_youtube_key_manager(self, parent=None, on_change=None):
+        """Cửa sổ quản lý kho YouTube API key (data/youtube_keys.json): dán hàng trăm key một lần / nạp từ file .txt,
+        bảng trạng thái từng key, kiểm tra hàng loạt (song song), xóa key đã chọn, gỡ key sai. Key chỉ hiện dạng che.
+        Phi modal. on_change() được gọi mỗi khi kho đổi (để cửa sổ Niche cập nhật dòng tóm tắt)."""
+        if getattr(self, "_ytkey_dialog", None) is not None:
+            try:
+                if self._ytkey_dialog.winfo_exists():
+                    self._ytkey_dialog.lift()
+                    return
+            except Exception:
+                pass
+            self._ytkey_dialog = None
+        NL = niche_learner
+        win = tk.Toplevel(self.root)
+        self._ytkey_dialog = win
+        win.title("Quản lý YouTube API key")
+        win.configure(bg=self.C_CARD)
+        win.geometry("820x680")
+        win.minsize(720, 580)
+        try:
+            win.transient(parent if parent is not None else self.root)
+        except Exception:
+            pass
+        entries = NL.pool_load()
+        job = {"busy": False, "queue": [], "done": False, "total": 0, "n": 0, "stop": False}
+        iid_of, idx_of = {}, {}
+
+        def _changed():
+            if callable(on_change):
+                try:
+                    on_change()
+                except Exception:
+                    pass
+
+        def _close():
+            job["stop"] = True
+            self._ytkey_dialog = None
+            win.destroy()
+        win.protocol("WM_DELETE_WINDOW", _close)
+
+        # Hàng nút + dòng tóm tắt ghim ĐÁY trước, bảng (giãn nở) pack sau cùng (bài học v1.6.9).
+        bar = tk.Frame(win, bg=self.C_CARD, padx=14, pady=10)
+        bar.pack(side="bottom", fill="x")
+        lbl_sum = tk.Label(win, text="", bg=self.C_CARD, fg=self.C_MUTED, font=("Segoe UI", 9), anchor="w",
+                           justify="left", wraplength=780)
+        lbl_sum.pack(side="bottom", fill="x", padx=14, pady=(8, 0))
+
+        top = tk.Frame(win, bg=self.C_CARD, padx=14, pady=10)
+        top.pack(side="top", fill="x")
+        tk.Label(top, text="Kho YouTube API key", bg=self.C_CARD, fg=self.C_ACCENT,
+                 font=("Segoe UI", 11, "bold")).pack(anchor="w")
+        tk.Label(top, bg=self.C_CARD, fg=self.C_MUTED, justify="left", font=("Segoe UI", 9), wraplength=780,
+                 text=("Dán key vào ô dưới — MỖI DÒNG 1 KEY (ngăn bằng dấu phẩy hoặc khoảng trắng cũng được), dán cả trăm key "
+                       "một lần được, hoặc nạp từ file .txt. Bot dùng lần lượt, key nào hết quota trong ngày thì tự chuyển "
+                       "sang key kế và hôm sau dùng lại.")).pack(anchor="w", pady=(2, 6))
+        txt = tk.Text(top, height=6, wrap="none", bg=self.C_FIELD, fg=self.C_FG, insertbackground=self.C_FG,
+                      relief="flat", highlightthickness=1, highlightbackground=self.C_BORDER, font=("Consolas", 9), undo=True)
+        txt.pack(fill="x")
+        lbl_paste = tk.Label(top, text="Ô dán đang trống.", bg=self.C_CARD, fg=self.C_MUTED, font=("Segoe UI", 9),
+                             anchor="w", justify="left")
+        lbl_paste.pack(fill="x", pady=(4, 0))
+        row = tk.Frame(top, bg=self.C_CARD)
+        row.pack(fill="x", pady=(6, 0))
+        btn_add = ttk.Button(row, text="Thêm vào kho", style="Tool.TButton")
+        btn_add.pack(side="left")
+        btn_file = ttk.Button(row, text="Nạp từ file .txt…", style="Tool.TButton")
+        btn_file.pack(side="left", padx=(6, 0))
+        btn_clear = ttk.Button(row, text="Xóa ô dán", style="Tool.TButton")
+        btn_clear.pack(side="left", padx=(6, 0))
+
+        mid = tk.Frame(win, bg=self.C_CARD, padx=14)
+        mid.pack(side="top", fill="both", expand=True)
+        tree = ttk.Treeview(mid, columns=("stt", "key", "status", "checked"), show="headings", selectmode="extended")
+        for col, head, w, anchor in (("stt", "STT", 50, "e"), ("key", "Key (đã che)", 130, "w"),
+                                     ("status", "Trạng thái", 420, "w"), ("checked", "Kiểm tra lúc", 110, "w")):
+            tree.heading(col, text=head)
+            tree.column(col, width=w, anchor=anchor, stretch=(col == "status"))
+        sb = ttk.Scrollbar(mid, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        tree.pack(side="left", fill="both", expand=True)
+        for st, color in ((NL.ST_OK, self.C_OK_FG), (NL.ST_QUOTA, self.C_WARN_FG), (NL.ST_INVALID, self.C_ERR_FG),
+                          (NL.ST_DISABLED, self.C_ERR_FG), (NL.ST_ERROR, self.C_WARN_FG), (NL.ST_NEW, self.C_MUTED)):
+            tree.tag_configure(st, foreground=color)
+
+        btn_check_all = ttk.Button(bar, text="Kiểm tra tất cả", style="Tool.TButton")
+        btn_check_all.pack(side="left")
+        btn_check_sel = ttk.Button(bar, text="Kiểm tra key đã chọn", style="Tool.TButton")
+        btn_check_sel.pack(side="left", padx=(6, 0))
+        btn_del = ttk.Button(bar, text="Xóa key đã chọn", style="Tool.TButton")
+        btn_del.pack(side="left", padx=(6, 0))
+        btn_prune = ttk.Button(bar, text="Gỡ key sai", style="Tool.TButton")
+        btn_prune.pack(side="left", padx=(6, 0))
+        ttk.Button(bar, text="Đóng", style="Tool.TButton", command=_close).pack(side="right")
+
+        def _row(e):
+            st = NL._effective(e)
+            label = NL.STATUS_LABEL[st]
+            if st in (NL.ST_ERROR, NL.ST_DISABLED) and e.get("msg"):
+                label += " — " + e["msg"][:80]
+            when = time.strftime("%d/%m %H:%M", time.localtime(e["checked"])) if e.get("checked") else "-"
+            return (idx_of.get(e["key"], 0) + 1, NL.short_mask(e["key"]), label, when), st
+
+        def _summary(extra="", color=None):
+            c = NL.pool_counts(entries)
+            lbl_sum.config(text=(extra + "  ·  " if extra else "") + "Kho: " + NL.pool_summary(entries)
+                           + (f" → {c['usable']} key sẵn sàng dùng." if c["total"] else ""),
+                           fg=color or self.C_MUTED)
+            try:
+                btn_prune.config(text=f"Gỡ key sai ({c[NL.ST_INVALID]})")
+            except Exception:
+                pass
+
+        def _rebuild():
+            tree.delete(*tree.get_children())
+            iid_of.clear()
+            idx_of.clear()
+            for i, e in enumerate(entries):
+                idx_of[e["key"]] = i
+                vals, st = _row(e)
+                iid_of[e["key"]] = tree.insert("", "end", values=vals, tags=(st,))
+
+        def _save(msg, color=None):
+            moved = NL.env_key_count()
+            if NL.pool_save(entries):
+                if moved:
+                    print(f"[+] Đã chuyển {moved} key YouTube từ .env (Quản lý API key) sang kho key data/youtube_keys.json.")
+                _summary(msg, color or self.C_OK_FG)
+            else:
+                _summary("KHÔNG ghi được file kho key (data/youtube_keys.json) — kiểm tra quyền ghi thư mục data", self.C_ERR_FG)
+            _changed()
+
+        def _paste_info(_e=None):
+            new, bad = NL.split_keys(txt.get("1.0", "end"))
+            if not new and not bad:
+                lbl_paste.config(text="Ô dán đang trống.", fg=self.C_MUTED)
+                return
+            have = {e["key"] for e in entries}
+            dup = len([k for k in new if k in have])
+            msg = f"Trong ô: {len(new) - dup} key mới"
+            if dup:
+                msg += f" · {dup} key đã có trong kho"
+            if bad:
+                msg += f" · {bad} đoạn KHÔNG giống API key (sẽ bỏ qua)"
+            lbl_paste.config(text=msg + " — CHƯA lưu, bấm 'Thêm vào kho'.", fg=self.C_ERR_FG if bad else self.C_ACCENT)
+
+        def _on_modified(_e=None):
+            try:
+                if txt.edit_modified():
+                    txt.edit_modified(False)
+                    _paste_info()
+            except Exception:
+                pass
+
+        def _add_keys(raw, source):
+            """-> True nếu đã xử lý xong đoạn dán (để xóa ô)."""
+            new, bad = NL.split_keys(raw)
+            if not new:
+                lbl_paste.config(text=(f"{source}: không có đoạn nào giống API key (key dài ~39 ký tự, gồm chữ, số, '-' và '_')."
+                                       if bad else f"{source}: đang trống — dán key vào trước."), fg=self.C_ERR_FG)
+                return False
+            added, dup = NL.pool_add(entries, new)
+            msg = f"Đã thêm {added} key" + (f", bỏ {dup} key trùng" if dup else "") + (
+                f", bỏ qua {bad} đoạn không giống key" if bad else "")
+            if added:
+                _rebuild()
+                print(f"[+] Kho YouTube API key: thêm {added} key — hiện có {len(entries)} key.")
+                _save(msg + ". Nên bấm 'Kiểm tra tất cả' để biết key nào dùng được.")
+            else:
+                _summary(msg, self.C_MUTED)
+            return True
+
+        def _add():
+            if _add_keys(txt.get("1.0", "end"), "Ô dán"):
+                txt.delete("1.0", "end")
+                txt.edit_modified(False)
+                lbl_paste.config(text="Ô dán đang trống.", fg=self.C_MUTED)
+
+        def _file():
+            path = filedialog.askopenfilename(parent=win, title="Chọn file chứa key (mỗi dòng 1 key)",
+                                              filetypes=[("Văn bản", "*.txt *.csv *.env"), ("Tất cả", "*.*")])
+            if not path:
+                return
+            try:
+                with open(path, "r", encoding="utf-8-sig", errors="replace") as f:
+                    raw = f.read(2_000_000)
+            except Exception as e:
+                lbl_paste.config(text=f"Không đọc được file: {str(e)[:120]}", fg=self.C_ERR_FG)
+                return
+            _add_keys(raw, "File " + os.path.basename(path))
+
+        def _clear():
+            txt.delete("1.0", "end")
+            txt.edit_modified(False)
+            lbl_paste.config(text="Ô dán đang trống.", fg=self.C_MUTED)
+
+        def _selected():
+            rev = {iid: k for k, iid in iid_of.items()}
+            return [rev[i] for i in tree.selection() if i in rev]
+
+        def _delete():
+            if job["busy"]:
+                return
+            keys = _selected()
+            if not keys:
+                _summary("Chưa chọn key nào trong bảng (bấm vào dòng; giữ Ctrl/Shift để chọn nhiều)", self.C_MUTED)
+                return
+            if not messagebox.askyesno("Xóa key", f"Xóa {len(keys)} key đã chọn khỏi kho?", parent=win):
+                return
+            n = NL.pool_remove(entries, keys)
+            _rebuild()
+            print(f"[+] Kho YouTube API key: xóa {n} key — còn {len(entries)} key.")
+            _save(f"Đã xóa {n} key")
+
+        def _prune():
+            if job["busy"]:
+                return
+            bad = [e["key"] for e in entries if e["status"] == NL.ST_INVALID]
+            if not bad:
+                _summary("Không có key nào đang bị báo KEY SAI (key hết quota không bị gỡ — hôm sau tự hồi)", self.C_MUTED)
+                return
+            if not messagebox.askyesno("Gỡ key sai", f"Gỡ {len(bad)} key bị báo KEY SAI khỏi kho?", parent=win):
+                return
+            n = NL.pool_remove(entries, bad)
+            _rebuild()
+            print(f"[+] Kho YouTube API key: gỡ {n} key sai — còn {len(entries)} key.")
+            _save(f"Đã gỡ {n} key sai")
+
+        def _set_busy(on):
+            job["busy"] = on
+            for b in (btn_check_all, btn_check_sel, btn_del, btn_prune, btn_add, btn_file):
+                try:
+                    b.config(state="disabled" if on else "normal")
+                except Exception:
+                    pass
+
+        def _poll():
+            try:
+                if not win.winfo_exists():
+                    return
+            except Exception:
+                return
+            while job["queue"]:
+                k, ok, why = job["queue"].pop(0)
+                job["n"] += 1
+                if NL.pool_mark(entries, k, ok, why) and k in iid_of:
+                    e = entries[idx_of[k]]
+                    vals, st = _row(e)
+                    tree.item(iid_of[k], values=vals, tags=(st,))
+            if not job["done"]:
+                _summary(f"Đang kiểm tra {job['n']}/{job['total']} key…")
+                win.after(200, _poll)
+                return
+            _set_busy(False)
+            c = NL.pool_counts(entries)
+            print(f"[+] Kho YouTube API key: kiểm tra xong {job['n']} key — {NL.pool_summary(entries)}.")
+            _save(f"Kiểm tra xong {job['n']} key", self.C_OK_FG if c["usable"] else self.C_ERR_FG)
+
+        def _check(keys):
+            if job["busy"]:
+                return
+            if not keys:
+                _summary("Không có key nào để kiểm tra", self.C_MUTED)
+                return
+            job.update(queue=[], done=False, total=len(keys), n=0, stop=False)
+            _set_busy(True)
+            _summary(f"Đang kiểm tra 0/{len(keys)} key…")
+
+            def _work():
+                try:
+                    NL.check_keys(keys, on_result=lambda k, ok, why: job["queue"].append((k, ok, why)),
+                                  should_stop=lambda: job["stop"])
+                finally:
+                    job["done"] = True
+            threading.Thread(target=_work, daemon=True).start()
+            _poll()
+
+        btn_add.config(command=_add)
+        btn_file.config(command=_file)
+        btn_clear.config(command=_clear)
+        btn_check_all.config(command=lambda: _check([e["key"] for e in entries]))
+        btn_check_sel.config(command=lambda: _check(_selected()))
+        btn_del.config(command=_delete)
+        btn_prune.config(command=_prune)
+        txt.bind("<<Modified>>", _on_modified)
+        tree.bind("<Delete>", lambda _e: _delete())
+        _rebuild()
+        _summary()
+        # Key thêm qua 'Quản lý API key' (YOUTUBE_API_KEY, YOUTUBE_API_KEY_2...) được chuyển hẳn vào kho ngay khi mở cửa sổ,
+        # để xóa/gỡ ở đây có hiệu lực (nếu để lại trong .env thì lần nạp sau key lại hiện ra).
+        _n_env = NL.env_key_count()
+        if _n_env:
+            _save(f"Đã chuyển {_n_env} key từ 'Quản lý API key' (.env) vào kho này — từ giờ quản lý key YouTube ở đây")
+        win.lift()
+        txt.focus_set()
+
+    def open_qa_agent(self):
+        """Cửa sổ hỏi đáp về dữ liệu của app. Chỉ đọc; email/IP được che trước khi gửi cho AI
+        (qa_agent.Masker) rồi ghép lại tên thật ở câu trả lời. Không modal — vừa chạy vừa hỏi được."""
+        if getattr(self, "_qa_dialog", None) is not None:
+            try:
+                if self._qa_dialog.winfo_exists():
+                    self._qa_dialog.lift()
+                    return
+            except Exception:
+                pass
+            self._qa_dialog = None
+        win = tk.Toplevel(self.root)
+        self._qa_dialog = win
+        win.title("Hỏi đáp AI — chỉ đọc dữ liệu của app")
+        win.geometry("860x640")
+        win.minsize(620, 420)
+        win.configure(bg=self.C_CARD)   # cùng nền với ttk.Frame/Label bên trong -> không lộ dải khác màu
+        try:
+            win.transient(self.root)
+        except Exception:
+            pass
+        self._qa_masker = qa_agent.Masker()
+        self._qa_history = []
+        self._qa_brain = None
+        self._qa_brain_name = ""
+        self._qa_busy = False
+        self._qa_token = None
+        self._qa_result = None
+
+        hint = ttk.Label(win, style="Muted.TLabel", justify="left",
+                         text="Hỏi về phiên chạy, lỗi, hạn mức ngày, giai đoạn ngâm, proxy. Trợ lý chỉ ĐỌC dữ liệu của app, "
+                              "không thao tác thay bạn. Email và IP được che trước khi gửi cho AI. Mỗi câu hỏi tốn 1 lượt gọi AI.")
+        hint.pack(side="top", fill="x", padx=12, pady=(10, 4))
+        hint.bind("<Configure>", lambda e: hint.configure(wraplength=max(240, e.width - 4)))
+
+        # Ghim khối nhập ở ĐÁY TRƯỚC rồi mới tới khung hội thoại giãn nở (bài học v1.6.9: widget
+        # expand pack trước sẽ nuốt hết chỗ, nút phía dưới thành 1x1 vô hình).
+        bottom = ttk.Frame(win, padding=(12, 4, 12, 10))
+        bottom.pack(side="bottom", fill="x")
+        self._qa_status = ttk.Label(bottom, text="Sẵn sàng.", style="Muted.TLabel")
+        self._qa_status.pack(side="bottom", fill="x", pady=(6, 0))
+        line = ttk.Frame(bottom)
+        line.pack(side="bottom", fill="x")
+        self._qa_var = tk.StringVar()
+        self._qa_entry = ttk.Entry(line, textvariable=self._qa_var)
+        self._qa_entry.pack(side="left", fill="x", expand=True)
+        self._qa_btn_send = ttk.Button(line, text="Hỏi", width=9, command=self._qa_send)
+        self._qa_btn_send.pack(side="left", padx=(8, 0))
+        ttk.Button(line, text="Xóa hội thoại", style="Tool.TButton",
+                   command=self._qa_clear).pack(side="left", padx=(6, 0))
+        samples = ttk.Frame(bottom)
+        samples.pack(side="bottom", fill="x", pady=(0, 6))
+        ttk.Label(samples, text="Gợi ý:", style="Muted.TLabel").pack(side="left", padx=(0, 6))
+        for s in self.QA_SAMPLES:
+            ttk.Button(samples, text=s, style="Tool.TButton",
+                       command=lambda t=s: self._qa_send(t)).pack(side="left", padx=(0, 6))
+
+        body = ttk.Frame(win, padding=(12, 0, 12, 6))
+        body.pack(side="top", fill="both", expand=True)
+        sb = ttk.Scrollbar(body, orient="vertical")
+        sb.pack(side="right", fill="y")
+        self._qa_text = tk.Text(body, wrap="word", relief="flat", bg=self.C_FIELD, fg=self.C_FG,
+                                insertbackground=self.C_FG, font=("Segoe UI", 10), padx=10, pady=8,
+                                spacing1=2, spacing3=4, yscrollcommand=sb.set, state="disabled",
+                                highlightthickness=1, highlightbackground=self.C_BORDER)
+        self._qa_text.pack(side="left", fill="both", expand=True)
+        sb.config(command=self._qa_text.yview)
+        self._qa_text.bind("<MouseWheel>",
+                           lambda e: (self._qa_text.yview_scroll(-1 * int(e.delta / 120), "units"), "break")[1])
+        self._qa_retag()
+        self._qa_entry.bind("<Return>", lambda _e: self._qa_send())
+        win.bind("<Escape>", lambda _e: win.destroy())
+        self._qa_entry.focus_set()
+
+    def _qa_retag(self):
+        """Màu chữ theo vai (bạn / trợ lý / ghi chú / lỗi) theo bảng màu hiện tại. Gọi lại khi đổi nền."""
+        txt = getattr(self, "_qa_text", None)
+        try:
+            if txt is None or not txt.winfo_exists():
+                return
+            txt.tag_configure("you", foreground=self.C_ACCENT, font=("Segoe UI", 10, "bold"))
+            txt.tag_configure("ai", foreground=self.C_FG)
+            txt.tag_configure("meta", foreground=self.C_MUTED, font=("Segoe UI", 9, "italic"))
+            txt.tag_configure("err", foreground=self.C_ERR_FG)
+        except Exception:
+            pass
+
+    def _qa_append(self, tag, text):
+        txt = getattr(self, "_qa_text", None)
+        try:
+            if txt is None or not txt.winfo_exists():
+                return
+            txt.config(state="normal")
+            txt.insert("end", text.rstrip() + "\n\n", tag)
+            txt.config(state="disabled")
+            txt.see("end")
+        except Exception:
+            pass
+
+    def _qa_clear(self):
+        if getattr(self, "_qa_busy", False):
+            return
+        self._qa_history = []
+        self._qa_masker = qa_agent.Masker()
+        try:
+            self._qa_text.config(state="normal")
+            self._qa_text.delete("1.0", "end")
+            self._qa_text.config(state="disabled")
+            self._qa_status.config(text="Đã xóa hội thoại.")
+        except Exception:
+            pass
+
+    def _qa_snapshot(self):
+        """MAIN THREAD: gom mọi thứ phải đọc từ Tk/biến module vào 1 dict thuần để luồng nền dùng."""
+        profiles = [{"id": r["id"], "name": r.get("name") or r["id"][:8], "group": r.get("group") or "",
+                     "firefox": bool(r.get("firefox"))} for r in self.profile_rows]
+
+        def _val(getter, default=""):
+            try:
+                return getter()
+            except Exception:
+                return default
+        n_tick = sum(1 for r in self.profile_rows if _val(lambda r=r: r["var"].get(), False))
+        config = {
+            "Chế độ ngâm": _val(self.var_phase_label.get),
+            "Số luồng": _val(self.spin_threads.get),
+            "Hạn mức phút/ngày (0 = tắt)": _val(lambda: self._daily_secs() // 60, "?"),
+            "Mục tiêu vòng, phút (0 = bot tự chọn)": _val(lambda: self._target_secs() // 60, "?"),
+            "AI Brain": _val(self.cbo_brain.get),
+            "Ngôn ngữ từ khóa": _val(self._keyword_lang),
+            "Bỏ qua YouTube": "có" if _val(self.var_skip_youtube.get, False) else "không",
+            "Số profile đang tick": n_tick,
+            "Phiên bản app": get_version_line(),
+        }
+        now = time.time()
+        slots = []
+        for key, pid in list(SLOT_PROFILE.items()):
+            if not SLOT_THREAD_ALIVE.get(key, True):
+                continue
+            t0, tl = SLOT_CYCLE_START.get(key), SLOT_LAST_LOG.get(key)
+            slots.append({"slot": key, "pid": pid, "elapsed_s": (now - t0) if t0 else None,
+                          "silent_s": (now - tl) if tl else None})
+        live = {"running": bool(self._running), "slots": slots, "waiting": dict(_PROXY_WAITING)}
+        bt = str(_val(self.cbo_brain.get) or "").strip()
+        cands = ([bt] if bt and bt != "none" else []) + [b for b in _brain_candidates_from_env() if b != bt]
+        cache = getattr(self, "_qa_proxy_cache", None)
+        pmap = cache[1] if cache and now - cache[0] < self.QA_PROXY_TTL_S else None
+        return {"profiles": profiles, "config": config, "live": live, "brain_cands": cands, "proxy_map": pmap,
+                "browser": _val(self.var_browser_type.get, BROWSER_GPM), "port": _val(self.var_api_port.get)}
+
+    def _qa_work(self, question, snap):
+        """LUỒNG NỀN (không chạm Tk): chọn AI còn sống -> gom dữ liệu đã che -> hỏi. Trả dict kết quả."""
+        try:
+            brain, name = self._qa_brain, self._qa_brain_name
+            if brain is None:
+                if not snap["brain_cands"]:
+                    return {"err": "Chưa có AI nào để hỏi: ô AI Brain đang để 'none' và chưa có API key. "
+                                   "Vào Công cụ ▾ → Quản lý API key để thêm key, rồi hỏi lại."}
+                brain, name, why = _pick_live_brain(snap["brain_cands"])
+                if brain is None:
+                    return {"err": f"Không AI nào trả lời được ({why}). Kiểm tra số dư/key trong Quản lý API key."}
+                self._qa_brain, self._qa_brain_name = brain, name
+            pmap = snap["proxy_map"]
+            if pmap is None:
+                pmap, _why = fetch_proxy_map(snap["browser"], snap["port"])
+                self._qa_proxy_cache = (time.time(), pmap)
+            ip_of = {pid: proxy_key(raw) for pid, raw in (pmap or {}).items()}
+            ctx = qa_agent.build_context(DatabaseHandler(), snap["profiles"], ip_of, snap["config"], snap["live"],
+                                         question, LOG_DIR, self._qa_masker)
+            answer, raw, err = qa_agent.answer_question(question, brain, ctx, self._qa_masker, self._qa_history)
+            if err:
+                self._qa_brain = None    # lượt sau dò lại AI còn sống
+                return {"err": f"AI '{name}' không trả lời: {_explain_brain_error(err)}."}
+            self._qa_history.append((self._qa_masker.mask(question), raw))
+            return {"answer": answer, "brain": name, "chars": len(ctx)}
+        except Exception as e:
+            return {"err": f"Lỗi khi hỏi đáp: {str(e)[:300]}"}
+
+    def _qa_send(self, text=None):
+        if getattr(self, "_qa_busy", False):
+            return
+        q = " ".join(str(text if text is not None else self._qa_var.get()).split())
+        if not q:
+            return
+        self._qa_var.set("")
+        self._qa_append("you", "Bạn: " + q)
+        snap = self._qa_snapshot()
+        self._qa_busy = True
+        self._qa_result = None
+        self._qa_t0 = time.time()
+        token = object()
+        self._qa_token = token
+        try:
+            self._qa_btn_send.config(state="disabled", text="Đang hỏi…")
+        except Exception:
+            pass
+
+        def _work():
+            res = self._qa_work(q, snap)
+            if self._qa_token is token:      # kết quả về trễ sau khi đã bỏ chờ thì vứt
+                self._qa_result = res
+        threading.Thread(target=_work, daemon=True).start()
+        self._qa_poll(token)
+
+    def _qa_poll(self, token):
+        """MAIN THREAD: nhặt kết quả của luồng nền (luồng nền KHÔNG được gọi root.after — bài học v1.5.7)."""
+        if self._qa_token is not token:
+            return
+        win = getattr(self, "_qa_dialog", None)
+        try:
+            alive = win is not None and win.winfo_exists()
+        except Exception:
+            alive = False
+        res = self._qa_result
+        waited = time.time() - getattr(self, "_qa_t0", time.time())
+        if res is None and alive and waited < self.QA_DEADLINE_S:
+            try:
+                self._qa_status.config(text=f"Đang hỏi AI… {int(waited)}s")
+            except Exception:
+                pass
+            win.after(250, lambda: self._qa_poll(token))
+            return
+        self._qa_token = None
+        self._qa_busy = False
+        if not alive:
+            return
+        if res is None:
+            res = {"err": f"AI chưa trả lời sau {self.QA_DEADLINE_S}s — đã thôi chờ. Hỏi lại, hoặc đổi AI Brain."}
+            self._qa_brain = None
+        if res.get("err"):
+            self._qa_append("err", "Trợ lý: " + res["err"])
+            status = "Lượt hỏi không thành công."
+        else:
+            self._qa_append("ai", "Trợ lý: " + res["answer"])
+            status = (f"Trả lời bởi '{res.get('brain')}' sau {int(waited)}s · đã gửi ~{res.get('chars', 0):,} ký tự "
+                      "dữ liệu (đã che email/IP).").replace(",", ".")
+        try:
+            self._qa_status.config(text=status)
+            self._qa_btn_send.config(state="normal", text="Hỏi")
+            self._qa_entry.focus_set()
+        except Exception:
+            pass
+
     def _set_utils_state(self, state):
         for btn in (self.btn_report, self.btn_open_logs, self.btn_load_keywords,
                     self.btn_refresh_profiles, self.btn_add_manual,
@@ -6136,7 +8306,41 @@ clearly tách nhóm hơn kiểu label trần + separator."""
         except requests.exceptions.RequestException:
             return False
 
+def shutdown_after_close(grace_s=20, close_wait_s=10, exit_fn=None, sleep=time.sleep, now=time.time):
+    """v1.9.1: gọi SAU khi cửa sổ chính đóng. Trước đây đóng cửa sổ chỉ tắt giao diện: luồng chạy profile
+    vẫn sống không ai thấy, và luồng nào KẸT thì tiến trình treo ngầm mãi (gặp thật 19/11: warmup 3 kẹt
+    từ 18:01, watchdog đã đóng trình duyệt lúc 18:22 mà luồng vẫn không tỉnh -> GPM_Auto_Bot.exe + node
+    driver còn sống sau khi đóng cửa sổ, giữ khóa proxy). Nay: báo dừng -> chờ tối đa grace_s cho luồng tự
+    xong -> đóng profile của slot còn sống -> chờ thêm close_wait_s -> thoát hẳn tiến trình."""
+    exit_fn = exit_fn or os._exit
+
+    def _workers():
+        return [t for t in threading.enumerate()
+                if t.is_alive() and not t.daemon and t is not threading.main_thread()]
+
+    def _wait(secs):
+        t_end = now() + secs
+        while _workers() and now() < t_end:
+            sleep(0.5)
+
+    STOP_EVENT.set()
+    if _workers():
+        _wait(grace_s)
+    if _workers():
+        for key, ent in list(SLOT_API.items()):
+            if not SLOT_THREAD_ALIVE.get(key) or not ent:
+                continue
+            api, pid = ent
+            try:
+                api.close_profile(pid)
+            except Exception:
+                pass
+        _wait(close_wait_s)
+    exit_fn(0)
+
+
 if __name__ == "__main__":
     root = tk.Tk()
     app = AutomationApp(root)
     root.mainloop()
+    shutdown_after_close()

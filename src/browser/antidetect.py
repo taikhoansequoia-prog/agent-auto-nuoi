@@ -56,12 +56,32 @@ class AntidetectAPI:
                                    "dung lượng ổ đĩa), mở được rồi thì chạy lại.")
             else:
                 self.last_error = msg or "API không trả link ws"
+                # v1.9.1 (gặp thật 19/11: MAIL219/237/240 lỗi 0 giây với 'Arg_NullReferenceException'):
+                # hỏi lại GPM thì ra 'insufficient_permission_profile' = tài khoản GPM đang đăng nhập
+                # không còn thấy profile này. Nói rõ để khỏi tưởng app hỏng.
+                why = self._profile_access_problem(profile_id)
+                if why:
+                    self.last_error = why + (f" (GPM báo: {msg})" if msg else "")
             return None
-            
+
         except requests.exceptions.RequestException as e:
             print(f"  [-] Lỗi kết nối mạng tới API: {e}")
             self.last_error = f"Không kết nối được GPM API: {e}"
             return None
+
+    def _profile_access_problem(self, profile_id):
+        """'' nếu GPM vẫn thấy profile; ngược lại 1 câu giải thích (best-effort, '' khi không hỏi được)."""
+        try:
+            r = requests.get(f"{self.base_url}/api/v1/profiles/{profile_id}", timeout=3).json()
+        except Exception:
+            return ""
+        if r.get("success") or isinstance(r.get("data"), dict):
+            return ""
+        code = str(r.get("message") or "")
+        if code == "insufficient_permission_profile" or "not" in code.lower():
+            return ("Tài khoản GPM đang đăng nhập không còn thấy profile này (đã bị xóa, chuyển chủ hoặc bị thu "
+                    "quyền chia sẻ). Bấm 'Tải từ GPM' để cập nhật danh sách rồi tick lại")
+        return ""
 
     def _profile_browser_version(self, profile_id):
         """Lấy 'chrome 155.0.x' của profile (best-effort, '' khi lỗi)."""

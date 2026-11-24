@@ -448,8 +448,8 @@ check("__init__ gọi _create_stage_tab() sau _create_board_tab()",
 check("_create_stage_tab duoc goi o ca __init__ lan start_automation",
       src_ui.count("self._create_stage_tab()") == 2,
       str(src_ui.count("self._create_stage_tab()")))
-check("start_automation cảnh báo lệch pha (chỉ hỏi, không tự đổi)",
-      "Lệch chế độ ngâm" in src_ui and "Vẫn chạy với chế độ đã chọn?" in src_ui)
+check("v1.9.2: start_automation tính chế độ chạy theo từng acc (không còn hộp lệch pha)",
+      "resolve_profile_phases(" in src_ui and "_phase_by_pid" in src_ui and "Lệch chế độ ngâm" not in src_ui)
 check("worker tự ghi mốc giai đoạn (log_stage_change source=auto)",
       'db.log_stage_change(' in src_ui and 'source="auto"' in src_ui)
 check("db_handler có compute_stage / get_stage_overview / backfill_stage_tracking",

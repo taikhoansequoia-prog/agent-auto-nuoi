@@ -15,6 +15,10 @@ def check(name, cond):
 root = tk.Tk()
 app = AutomationApp(root)
 root.update()
+# v1.9.2: danh sách mặc định chia mục theo GIAI ĐOẠN SHEET; bộ test này kiểm hành vi nhóm GPM
+# (bộ test này KHÔNG cô lập data -> chặn ghi config thật, kẻo đổi 'Xếp theo' của người dùng)
+app.save_current_config = lambda: None
+app.var_prof_groupby.set(app.PROF_GROUPBY_LABELS["group"]); app._on_groupby_changed(); root.update()
 
 # 1) Tải profile THẬT từ API GPM
 api = BrowserFactory.get_api(BROWSER_GPM, base_url="http://localhost:9495")

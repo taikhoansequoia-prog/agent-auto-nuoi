@@ -57,7 +57,8 @@ HAGRID_DAYS = 7              # đồng hồ B: 7 ngày để mở khoá hành đ
 # Pha bot (workflow/warmup.py) suy ra từ giai đoạn — người vận hành có thể ép bằng phase_override.
 STAGE_SUGGESTED_PHASE = {"S0": "clean", "S1": "mail", "S2": "mail",
                          "S3": "mail", "S4": "youtube", "S5": "youtube"}
-VALID_PHASES = ("clean", "mail", "youtube")
+# v1.9.3: + "channel" (chế độ 4 — ngâm kênh theo niche). Chỉ chọn tay / ghim tay; giai đoạn sheet KHÔNG tự suy ra.
+VALID_PHASES = ("clean", "mail", "youtube", "channel")
 
 
 def _parse_iso_date(value):
@@ -557,6 +558,27 @@ class DatabaseHandler:
             _say(f"[!] log_activity lỗi (bỏ qua, không ảnh hưởng bot): {e}")
             return False
 
+    def count_activity(self, profile_id, action, days=1):
+        """v1.9.3: số lần profile đã làm `action` (status khác 'error') trong `days` ngày gần nhất,
+        tính theo NGÀY LỊCH (days=1 -> chỉ hôm nay). Dùng cho trần like/sub rất thưa của chế độ ngâm kênh.
+        Best-effort: lỗi -> 0."""
+        if not profile_id or not action:
+            return 0
+        try:
+            d = max(1, int(days)) - 1
+            conn = sqlite3.connect(self.db_path)
+            row = conn.execute(
+                "SELECT COUNT(*) FROM activity_history WHERE profile_id=? AND action=? "
+                "AND COALESCE(status,'ok') <> 'error' "
+                "AND date(created_at) >= date('now','localtime', ?)",
+                (profile_id, action, f"-{d} days"),
+            ).fetchone()
+            conn.close()
+            return int(row[0] or 0)
+        except Exception as e:
+            _say(f"[!] count_activity lỗi (bỏ qua): {e}")
+            return 0
+
     def get_activity_summary(self, profile_id=None, days=7):
         """
         Tổng hợp hoạt động gần `days` ngày (mặc định 7) để báo cáo.
@@ -885,6 +907,29 @@ class DatabaseHandler:
         except Exception as e:
             _say(f"[!] get_stage_history lỗi (bỏ qua): {e}")
             return []
+
+    def get_latest_stage_changes(self):
+        """
+        v1.9.2: lần đổi giai đoạn GẦN NHẤT của mỗi profile (để UI đánh dấu "mới sang hôm nay").
+        -> {pid: {"stage", "entered_at", "source", "n_rows"}}; n_rows = tổng số dòng lịch sử của
+        profile đó (1 = lần đầu được ghi, chưa phải "đổi"). Thuần SELECT, lỗi -> {}.
+        """
+        out = {}
+        try:
+            conn = sqlite3.connect(self.db_path)
+            rows = conn.execute(
+                "SELECT s.profile_id, s.stage, s.entered_at, s.source, c.n "
+                "FROM stage_history s "
+                "JOIN (SELECT profile_id, MAX(id) AS mid, COUNT(*) AS n "
+                "      FROM stage_history GROUP BY profile_id) c "
+                "  ON c.mid = s.id"
+            ).fetchall()
+            conn.close()
+            for pid, stage, at, src, n in rows:
+                out[pid] = {"stage": stage, "entered_at": at, "source": src, "n_rows": int(n or 0)}
+        except Exception as e:
+            _say(f"[!] get_latest_stage_changes lỗi (bỏ qua): {e}")
+        return out
 
     def get_stage_overview(self, today=None):
         """

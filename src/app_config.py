@@ -51,6 +51,18 @@ DEFAULTS = {
     # v1.5.4: bot Telegram đổi mật khẩu cổng API từ xa (token nằm trong .env, KHÔNG lưu ở đây)
     "telegram_enabled": False,
     "telegram_chat_id": "",
+    # v1.9.2: chế độ chạy theo GIAI ĐOẠN SHEET của từng acc. force_phase=True = ép mọi acc theo
+    # combobox (hành vi cũ); prof_group_by = cách chia mục danh sách tài khoản ("stage" | "group").
+    "force_phase": False,
+    "prof_group_by": "stage",
+    # v1.9.3: chế độ 4 "Ngâm kênh theo niche". Mỗi niche = {name, description, keywords[], channels[],
+    # negative[], groups[] (tên nhóm GPM áp dụng; rỗng = mọi nhóm), sync_locale(bool)}.
+    "niches": [],
+    "niche_ai": "",          # v1.10.0: AI dùng để phân tích niche ("" = tự chọn, ưu tiên Claude)
+    "claude_account_model": "",     # v1.13.0: model của Claude tài khoản ("" = sonnet)
+    "niche_debate_rounds": 2,       # v1.14.0-1.15.0 (không còn dùng): số vòng đấu trí cố định
+    "niche_debate_cap": 5,          # v1.16.0: 2 AI tranh luận TỚI KHI CẢ HAI CHỐT; đây là số vòng TỐI ĐA mỗi chủ đề (0 = tắt)
+    "chatgpt_account_model": "",    # v1.13.0: model của ChatGPT tài khoản ("" = Codex tự chọn model đầu danh sách)
 }
 
 

@@ -11,6 +11,9 @@ except Exception:  # fallback nếu 'src' chưa nằm trên sys.path
     _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))))
     from src import lang_profiles as _LANG
 
+# v1.9.3: CHẾ ĐỘ 4 "NGÂM KÊNH THEO NICHE" — toàn bộ logic nằm ở workflow/channel_mode.py (mixin)
+from src.workflow.channel_mode import ChannelModeMixin
+
 
 def _fmt_session_dur(seconds):
     """Định dạng giây -> '45s' / '12m30s' cho log giới hạn phiên (v1.5.2)."""
@@ -39,7 +42,7 @@ def _sample_action_rest(rng=random):
     return rng.uniform(300, 480)
 
 
-class WarmupWorkflow:
+class WarmupWorkflow(ChannelModeMixin):
     def __init__(self, context, db_handler=None, profile_id=None, needs_sub=False, session_theme=None, skip_youtube=False, skip_random_keywords=False, brain=None, phase="clean", should_stop=None, keyword_lang="en"):
         self.context = context
         self.db = db_handler
@@ -51,7 +54,11 @@ class WarmupWorkflow:
         self.skip_youtube = skip_youtube # LƯU TRẠNG THÁI TICK BỎ QUA YOUTUBE
         self.skip_random_keywords = skip_random_keywords # LƯU TRẠNG THÁI TICK BỎ QUA TỪ KHÓA NGẪU NHIÊN
         # Giai đoạn ngâm: "clean" (trắng, chưa mail) | "mail" (đã login mail) | "youtube" (cày YouTube)
-        self.phase = phase if phase in ("clean", "mail", "youtube") else "clean"
+        # v1.9.3: + "channel" (ngâm kênh theo niche — phiên 5 bước theo SOP, xem channel_mode.py)
+        self.phase = phase if phase in ("clean", "mail", "youtube", "channel") else "clean"
+        # v1.9.3: cấu hình niche (name/description/keywords/channels/negative/sync_locale) — UI gán SAU khi
+        # tạo workflow (giống keyword_cluster). Rỗng -> chế độ channel tạm dùng từ khóa của phiên.
+        self.niche = {}
         # Callback dừng an toàn: GUI truyền (vd STOP_EVENT.is_set) -> phiên dừng sau hành động hiện tại
         self._should_stop_cb = should_stop
         self.context.on("dialog", lambda dialog: dialog.accept())
@@ -3529,6 +3536,9 @@ class WarmupWorkflow:
         Khởi chạy một phiên lướt web hoàn toàn ngẫu nhiên.
         Tích hợp bộ nhớ chống lặp hành động liên tiếp.
         """
+        # v1.9.3: chế độ 4 "Ngâm kênh" KHÔNG bốc hành động ngẫu nhiên — chạy phiên 5 bước theo SOP.
+        if self.phase == "channel":
+            return self.run_channel_session()
         page = self.context.new_page()
         self.enable_virtual_cursor(page)
         

@@ -114,6 +114,29 @@ class GenericLLMBrain(BaseBrain):
             print(f"[-] Lỗi GenericLLMBrain (ask_text): {last}")
         return ""
 
+    def ask_chat(self, system: str, user: str, timeout=60, temperature=0.2) -> str:
+        """v1.9.1: hỏi đáp với LỜI DẶN HỆ THỐNG RIÊNG (ask_text ghim vai 'trợ lý tạo từ khóa, chỉ trả về
+        từ khóa' nên không dùng cho hỏi đáp được). Không in gì; lỗi nằm ở self.last_error.
+        Nhiều key -> xoay vòng + thử key kế khi hết credit/quota, giống ask_text."""
+        tries = min(len(self._keys), 3) if len(self._keys) > 1 else 1
+        idx = self._next_key_index() if len(self._keys) > 1 else 0
+        for _attempt in range(tries):
+            try:
+                response = self._client_for(idx).chat.completions.create(
+                    model=self.model_name,
+                    messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+                    temperature=temperature,
+                    timeout=timeout or 60,
+                )
+                self.last_error = ""
+                return (response.choices[0].message.content or "").strip()
+            except Exception as e:
+                self.last_error = str(e)
+                if not _should_rotate(e):
+                    break
+                idx = (idx + 1) % len(self._keys)
+        return ""
+
     def analyze_text(self, prompt):
         """Dùng cho các tác vụ thuần văn bản cần trả về JSON dict."""
         try:

@@ -163,7 +163,9 @@ check("build_session_plan nhận phase + skip_youtube", all(s["platform"] != "yo
       and any(s["platform"] == "youtube" for s in p_norm))
 src_u = open(os.path.join(SRC, "ui_main.py"), encoding="utf-8").read()
 check("start_automation truyền pha + Bỏ qua YouTube vào khâu sinh kế hoạch",
-      'self._plan_preview, PHASE_MAP.get(self.var_phase_label.get(), "clean"),' in src_u
+      # v1.9.2 đổi biểu thức pha thành biến _phase_sel (cùng giá trị) — chấp nhận cả hai cách viết
+      ('self._plan_preview, PHASE_MAP.get(self.var_phase_label.get(), "clean"),' in src_u
+       or "self._plan_preview, _phase_sel," in src_u)
       and "bool(self.var_skip_youtube.get()))," in src_u)
 
 print("\n== 4. GPM DownloadProfileFailed có lời giải thích")

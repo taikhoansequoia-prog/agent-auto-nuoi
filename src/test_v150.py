@@ -262,7 +262,7 @@ check("_parse_iso_date hợp lệ", dbm._parse_iso_date("2026-10-01") == dt.date
 check("_parse_iso_date rác/None -> None",
       dbm._parse_iso_date("abc") is None and dbm._parse_iso_date(None) is None
       and dbm._parse_iso_date("") is None)
-check("VALID_PHASES = clean/mail/youtube", dbm.VALID_PHASES == ("clean", "mail", "youtube"))
+check("VALID_PHASES = clean/mail/youtube(+channel v1.9.3)", dbm.VALID_PHASES == ("clean", "mail", "youtube", "channel"))
 
 # ---------------------------------------------------------------- 3. schema + setters
 hr("[3] schema mới + setter giữ cột anh-em")
@@ -945,34 +945,43 @@ try:
           str(texts))
     check("start: slot nằm giữa MAIN và 3 tab báo cáo",
           texts[1].startswith("Slot") and len(texts) == 1 + 2 + 3, str(texts))
-    titles = MB.titles("askyesno")
-    check("start: hỏi cảnh báo lệch chế độ ngâm", titles[:1] == ["Lệch chế độ ngâm"], str(titles))
-    q = " ".join(m for k, t, m in MB.calls if k == "askyesno")
-    check("cảnh báo nêu acc + pha đề xuất", "đang ở giai đoạn KHÁC" in q and "đề xuất" in q,
-          q[:250])
-    check("cảnh báo nêu đúng 1/4 acc lệch", "1/4 acc" in q, q[:200])
-    check("cảnh báo nêu PID 8 ký tự của acc lệch", PID_G2[:8] in q, q[:200])
-    check("cảnh báo không tự đổi lựa chọn (chỉ hỏi)",
+    # v1.9.2: KHÔNG còn hộp "Lệch chế độ ngâm" — mỗi acc chạy theo giai đoạn sheet của riêng nó
+    check("start v1.9.2: không hỏi hộp lệch pha nào", MB.titles("askyesno") == [],
+          str(MB.titles("askyesno")))
+    pm = getattr(app, "_phase_by_pid", {}) or {}
+    ps = getattr(app, "_phase_src", {}) or {}
+    check("chế độ theo acc: S0 -> 1 Acc mới (clean)", pm.get(PID_G1) == "clean", str(pm))
+    check("chế độ theo acc: S4 -> 3 Cày YouTube (suy từ giai đoạn)",
+          pm.get(PID_G2) == "youtube" and ps.get(PID_G2) == "giai đoạn", f"{pm} {ps}")
+    check("chế độ theo acc: chưa đặt ngày -> combobox mặc định",
+          pm.get(PID_G3) == "clean" and ps.get(PID_G3) == "mặc định", str(ps))
+    check("chế độ theo acc: ghim tay clean THẮNG giai đoạn S5",
+          pm.get(PID_G4) == "clean" and ps.get(PID_G4) == "ghim", str(ps))
+    check("combobox không bị tự đổi",
           app.var_phase_label.get() == ui.PHASE_LABEL_BY_KEY["clean"])
     check("start: không sinh hộp lỗi", MB.titles("showerror") == [], str(MB.calls))
     check("start: chuyển sang trạng thái đang chạy", app._running is True)
     check("start: số slot = min(threads 2, 4 hồ sơ) = 2", app._active_slots == [0, 1],
           str(app._active_slots))
-    # Trả lời No -> phải dừng trước khi đổi UI
+    # v1.9.2: HỦY ở hộp xác nhận phân bổ -> phải dừng trước khi đổi UI
     app._running = False
     app._active_slots = []
     MB.reset()
-    MB.yes = False
     for tab in list(nb.tabs())[1:]:
         nb.forget(tab)
+    app.show_assignment_confirm = lambda *a, **k: False
     app.start_automation()
     root.update()
-    check("No ở cảnh báo lệch pha -> KHÔNG chạy", app._running is False)
-    check("No -> không tạo tab slot",
+    check("HỦY ở hộp xác nhận -> KHÔNG chạy", app._running is False)
+    check("HỦY -> không tạo tab slot",
           [str(nb.tab(x, "text") or "").strip() for x in nb.tabs()] == ["MAIN"],
           str([nb.tab(x, "text") for x in nb.tabs()]))
-    check("No -> vẫn hỏi đúng 1 lần cùng hộp thoại",
-          MB.titles("askyesno") == ["Lệch chế độ ngâm"], str(MB.titles("askyesno")))
+    # v1.9.2: tick "Ép tất cả acc" -> mọi acc theo combobox, kể cả S4/S5
+    app.var_force_phase.set(True)
+    pm2, src2 = app.resolve_profile_phases([PID_G1, PID_G2, PID_G3, PID_G4])
+    check("Ép tất cả: S4 cũng chạy theo combobox (clean)",
+          pm2.get(PID_G2) == "clean" and set(src2.values()) == {"ép"}, f"{pm2} {src2}")
+    app.var_force_phase.set(False)
 finally:
     MB.yes = True
     MB.reset()
@@ -1010,8 +1019,9 @@ check("start_automation tạo tab giai đoạn SAU tab board",
       < src_ui.index("self._create_stage_tab()", src_ui.index("def start_automation")))
 check("gọi _create_stage_tab ở cả __init__ lẫn start_automation",
       src_ui.count("self._create_stage_tab()") == 2, str(src_ui.count("self._create_stage_tab()")))
-check("chỉ cảnh báo lệch pha, không tự đổi phase",
-      "Vẫn chạy với chế độ đã chọn?" in src_ui
+check("v1.9.2: chế độ theo acc (resolve_profile_phases), không tự đổi combobox",
+      "resolve_profile_phases(" in src_ui and "_phase_by_pid" in src_ui
+      and "Lệch chế độ ngâm" not in src_ui
       and "self.var_phase_label.set" not in _body(src_ui, "start_automation")
       and "var_phase_label.set" not in _body(src_ui, "start_automation"))
 check("worker tự ghi mốc giai đoạn source=auto",

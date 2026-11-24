@@ -30,6 +30,7 @@ KNOWN_KEYS = [
     ("QWEN_API_KEY", "Qwen DashScope (brain qwen-max / qwen-flash)"),
     ("DASHSCOPE_API_KEY", "Qwen - alias cũ (nếu QWEN_API_KEY trống)"),
     ("TELEGRAM_BOT_TOKEN", "Bot Telegram đổi mật khẩu từ xa (v1.5.4)"),
+    ("YOUTUBE_API_KEY", "YouTube Data API — nên thêm ở Niche ngâm kênh → Quản lý key (kho key riêng, v1.9.8)"),
 ]
 
 _PBKDF2_ROUNDS = 200_000
@@ -284,7 +285,7 @@ def sanitize_key_name(raw):
 
 # Tên key đã có brain riêng trong app -> không coi là "cổng tự đặt".
 _BUILTIN_BRAIN_KEYS = {"GEMINI_API_KEY", "OPENAI_API_KEY", "QWEN_API_KEY", "DASHSCOPE_API_KEY",
-                       "CLAUDE_API_KEY", "CLAUDE_LAU", "TELEGRAM_BOT_TOKEN"}
+                       "CLAUDE_API_KEY", "CLAUDE_LAU", "TELEGRAM_BOT_TOKEN", "YOUTUBE_API_KEY"}
 
 
 def custom_providers(path=None):
